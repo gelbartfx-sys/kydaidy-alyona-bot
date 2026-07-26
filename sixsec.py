@@ -7,8 +7,11 @@
   Кнопка → sixsec_begin, вечер 1 сразу. Вечера 2–3 — тик run_sixsec_tick
     (~20 ч, метка ДО отправки, как run_atm_nextday_tick).
   Каждый вечер: zadanie + vozvrat_vopros (Да/Пока нет).
-    «Да»  → bank_add(couple, sixsec_dayN, +1) → otvet_da + обновлённый банк.
-    «Нет» → otvet_net, банк не растёт (KPI «мне ОТВЕТИЛИ», без натяжки).
+    «Да»  → otvet_da. Общий банк НЕ растёт: вечер — личный шаг, а Банк 5:1
+      считает только подтверждённый отклик партнёра (чек-ин). Решение Кая 26.07.
+    «Нет» → otvet_net.
+    Личный прогресс виден по событиям sixsec_day{N}_done в funnel_events —
+    отдельной таблицы не заводим, журнал событий уже всё хранит.
   После 3-го вечера → SIXSEC_FINAL + CTA «Пригласить партнёра»
     (переиспользуем готовый инвайт quiz_atmosfera: callback atmq:invite,
      deeplink pair_<tg_id> → merge_banks при образовании пары).
@@ -113,11 +116,11 @@ async def cb_sixsec_answer(cb: CallbackQuery):
     item = _day_item(weak, day) or {}
     couple = await resolve_couple(tg_id)
 
-    if yes:
-        try:
-            await bank_add(couple, f"sixsec_day{day}", 1)  # парный gate — позже (чек-ин)
-        except Exception:
-            logger.warning("sixsec bank_add failed (continuing)", exc_info=True)
+    # Само-отчёт «Да» больше НЕ растит общий банк (решение Кая 26.07.2026):
+    # Банк 5:1 — про подтверждённый отклик партнёра («мне ОТВЕТИЛИ»), а вечер
+    # человек отмечает сам за себя. Рост на само-отчёт завышал бы банк и обманывал
+    # пару. Личный прогресс виден по событиям sixsec_day{N}_done ниже — отдельной
+    # таблицы не заводим, журнал событий уже всё хранит.
     try:
         await log_event(tg_id, f"sixsec_day{day}_done", "da" if yes else "net")
     except Exception:
@@ -192,18 +195,24 @@ if __name__ == "__main__":
 
     async def _demo():
         await init_db()
-        # 3 «да» подряд (kind sixsec_day1..3) → банк +3
+        # Вечера НЕ растят общий банк: у пары без чек-инов он остаётся пустым,
+        # сколько бы вечеров человек ни отметил за себя.
         c = await _rc(111)
-        for d in (1, 2, 3):
-            await _ba(c, f"sixsec_day{d}", 1)
-        assert (await _gb(c))["plus"] == 3, await _gb(c)
-        # идемпотентность: повтор вечера 2 в тот же день не дублит
-        await _ba(c, "sixsec_day2", 1)
-        assert (await _gb(c))["plus"] == 3
-        assert (await _gb(c))["ratio_str"] == "3:0"  # без холодных моментов
-        # ветка «нет»: другая пара, ни одного bank_add → 0
-        c2 = await _rc(222)
-        assert (await _gb(c2))["plus"] == 0
+        assert (await _gb(c))["plus"] == 0, await _gb(c)
+
+        # Сторож регресса: ответ на вечер не должен звать bank_add. Раньше звал —
+        # банк рос на само-отчёт и завышал «мне ОТВЕТИЛИ».
+        import inspect
+        src = inspect.getsource(cb_sixsec_answer)
+        assert "bank_add" not in src, "вечер снова растит общий банк — вернулась старая логика"
+
+        # Сторож текстов: реакции не должны обещать вклад в общий банк.
+        for _o, _days in SIXSEC.items():
+            for _it in _days:
+                for _k in ("otvet_da", "otvet_net"):
+                    assert "плюс в банк" not in _it.get(_k, "").lower(), (_o, _k)
+                    assert "плюс в общий банк" not in _it.get(_k, "").lower(), (_o, _k)
+
         # структурная валидация контракта данных
         assert set(SIXSEC_INTRO) >= set(OPORAS)
         for o in OPORAS:
@@ -215,7 +224,8 @@ if __name__ == "__main__":
         # _day_item границы
         assert _day_item("teplo", 1) is not None
         assert _day_item("teplo", 0) is None and _day_item("teplo", 4) is None
-        print("sixsec self-check OK: bank +3 on 3×да, +0 без да, идемпотентно; data-контракт валиден")
+        print("sixsec self-check OK: вечера НЕ растят общий банк, bank_add в ответе "
+              "отсутствует, тексты не обещают банк; data-контракт валиден")
 
     asyncio.run(_demo())
     os.remove(database.DB_PATH)
