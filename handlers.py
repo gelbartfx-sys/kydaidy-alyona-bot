@@ -240,14 +240,29 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _onramp_keyboard() -> InlineKeyboardMarkup:
-    # Вход с ролика «за встречей»: ОДНА кнопка = обязательный путь. Тест открывается
-    # как Telegram Mini App (web_app) — внутри ТГ, без выхода в браузер. В финале
-    # Mini App возвращает в чат по deeplink s_<dist> → путь А (портрет→кружок→встреча).
+# Mini App «Дом семьи» — основной продукт (решение Кая 26.07): тест, опоры,
+# чек-ин и ритуалы живут там, бот ведёт в приложение и присылает напоминания.
+APP_URL = "https://kydaidy.com/app/"
+
+OPEN_APP_TEXT = ("Тест «Атмосфера дома» — 12 вопросов, две минуты.\n"
+                 "Покажет, на какой опоре держится ваш дом, а какая просела.")
+
+INVITED_PARTNER_TEXT = ("Вас позвали пройти тест вдвоём.\n\n"
+                        "Двенадцать вопросов, две минуты. Потом увидите общую карту: "
+                        "где вы смотрите одинаково, а где по-разному.")
+
+
+def _app_keyboard(url: str, label: str) -> InlineKeyboardMarkup:
+    """Кнопка открытия Mini App внутри Telegram (без выхода в браузер)."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌑 Пройти зеркало → к встрече",
-                              web_app=WebAppInfo(url="https://kydaidy.com/app"))],
+        [InlineKeyboardButton(text=label, web_app=WebAppInfo(url=url))],
     ])
+
+
+def _onramp_keyboard() -> InlineKeyboardMarkup:
+    # Вход одной кнопкой в приложение. Прежний текст («пройти зеркало → к встрече»)
+    # остался от до-пивотной воронки Тени и противоречит нише пар — заменён.
+    return _app_keyboard(f"{APP_URL}#/test", "Пройти тест «Атмосфера дома»")
 
 
 # ── Навигация: «← Назад» / «🏠 Меню» (единый стиль на всех экранах) ───────────
@@ -323,16 +338,23 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         if uid.lstrip("-").isdigit():
             await upsert_user(user.id, user.username, user.first_name)
             await set_user_source(user.id, source)
-            from quiz_atmosfera import start_atm_quiz
-            await start_atm_quiz(message, source=source, pair_src=int(uid))
+            # Тест переехал в Mini App (решение Кая 26.07): ведём партнёра ТУДА же,
+            # куда пошёл первый. Иначе половина пары проходит тест в чате, половина
+            # в приложении — карта пары собирается из двух разных путей.
+            # pair=<uid> приложение передаст в quiz_save, там и свяжется пара.
+            await message.answer(
+                INVITED_PARTNER_TEXT,
+                reply_markup=_app_keyboard(f"{APP_URL}?pair={int(uid)}#/test",
+                                           "Пройти тест"))
             return
     # Соло-вход: ?start=test | yt* | pin* → сразу тест (мандат ТЗ E1 22.07).
     if args == "test" or args.startswith(("yt", "pin")):
         _, source = _split_source(args)
         await upsert_user(user.id, user.username, user.first_name)
         await set_user_source(user.id, source or args)
-        from quiz_atmosfera import start_atm_quiz
-        await start_atm_quiz(message, source=source or args)
+        await message.answer(
+            OPEN_APP_TEXT,
+            reply_markup=_app_keyboard(f"{APP_URL}#/test", "Пройти тест"))
         return
 
     args, source = _split_source(args)

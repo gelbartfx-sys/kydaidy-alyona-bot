@@ -39,7 +39,7 @@ from followup import run_followup_tick
 from nurture import run_nurture_tick
 from quiz_atmosfera import atm_router, run_atm_nextday_tick
 from sixsec import sixsec_router, run_sixsec_tick
-from checkin import checkin_router
+from checkin import checkin_router, run_checkin_tick
 from webhooks import setup_webhooks
 
 logging.basicConfig(
@@ -211,6 +211,12 @@ async def main():
     scheduler.add_job(run_atm_nextday_tick, "interval", minutes=30, args=[bot])
     # «6 секунд» (Шаг 2, on-ramp): вечера 2–3 через ~20 ч после предыдущего.
     scheduler.add_job(run_sixsec_tick, "interval", minutes=30, args=[bot])
+    # Дневной чек-ин: 21:00 по Москве. Сутки в банке тоже считаются по Москве
+    # (database._bank_day_key) — иначе ответ после полуночи уезжал бы в другой день
+    # и парный gate не срабатывал. Шлём только парам, где есть оба; поставившие
+    # паузу и уже ответившие пропускаются, поэтому повторный запуск не задваивает.
+    scheduler.add_job(run_checkin_tick, "cron", hour=21, minute=0,
+                      timezone="Europe/Moscow", args=[bot])
     # HeyGen кредит-монитор: заранее пишет Каю, когда кредиты на исходе (живые
     # кружки коуча их тратят). No-op, пока не задан HEYGEN_API_KEY.
     scheduler.add_job(
@@ -250,6 +256,19 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", settings.port)
     await site.start()
     logger.info(f"Webhook server started on port {settings.port}")
+
+    # Синяя кнопка меню открывает Mini App «Дом семьи» — основной продукт
+    # (решение Кая 26.07): тест, опоры, чек-ин и ритуалы живут там.
+    # Ставится при каждом старте: операция идемпотентная, отдельная миграция ни к чему.
+    try:
+        from aiogram.types import MenuButtonWebApp, WebAppInfo
+        from handlers import APP_URL
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="Дом семьи",
+                                         web_app=WebAppInfo(url=APP_URL)))
+        logger.info("menu button -> Mini App")
+    except Exception:
+        logger.warning("set_chat_menu_button failed (continuing)", exc_info=True)
 
     # Polling Telegram (на старте — polling, потом можно переключить на webhook)
     logger.info("Starting Telegram polling...")

@@ -28,6 +28,7 @@ from aiogram.types import (
 from database import (
     log_event, resolve_couple, bank_add, render_bank_card,
     couple_partner, checkin_set, checkin_day,
+    checkin_pause_set, checkin_paused, couples_full,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,16 +46,64 @@ CHECKIN_SOLO = ("Пока вы идёте в одиночку. Пригласи�
 CHECKIN_WAIT = "Записал. Раскроем, когда ответите оба."
 
 
+CHECKIN_PAUSED_REPLY = ("Хорошо, неделю не спрашиваю. Захотите раньше — /checkin.")
+
+
 def _q_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Да", callback_data="chk:a:yes"),
-        InlineKeyboardButton(text="Пока нет", callback_data="chk:a:no"),
-    ]])
+    # Кнопка паузы стоит рядом с ответами намеренно: выход должен быть там же, где
+    # вопрос. Ежедневная рассылка без явного «не спрашивать» собирает жалобы на
+    # спам, а это риск блокировки бота (критическая зависимость проекта).
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да", callback_data="chk:a:yes"),
+         InlineKeyboardButton(text="Пока нет", callback_data="chk:a:no")],
+        [InlineKeyboardButton(text="Не спрашивать неделю", callback_data="chk:pause")],
+    ])
+
+
+@checkin_router.callback_query(F.data == "chk:pause")
+async def cb_checkin_pause(cb: CallbackQuery):
+    await checkin_pause_set(cb.from_user.id, days=7)
+    try:
+        await log_event(cb.from_user.id, "checkin_pause", "7d")
+    except Exception:
+        logger.debug("log_event checkin_pause failed", exc_info=True)
+    try:
+        await cb.message.edit_text(CHECKIN_PAUSED_REPLY, parse_mode=None)
+    except Exception:
+        await cb.message.answer(CHECKIN_PAUSED_REPLY, parse_mode=None)
+    await cb.answer()
 
 
 async def send_checkin(bot, tg_id: int):
     """Отправить дневной вопрос чек-ина одному партнёру (для планировщика/CTA)."""
     await bot.send_message(tg_id, CHECKIN_Q, parse_mode=None, reply_markup=_q_keyboard())
+
+
+async def run_checkin_tick(bot):
+    """Дневная рассылка чек-ина. Планировщик зовёт раз в сутки в 21:00 МСК.
+
+    Кому: только парам, где есть ОБА (couples_full) — одиночке вопрос про поворот
+    друг к другу каждый вечер звучит как напоминание об одиночестве.
+    Кого пропускаем: поставивших паузу и тех, кто уже ответил сегодня (идемпотентно
+    при повторном запуске — редеплой в 21:00 не задваивает сообщение).
+    Крэш-сейф: падение по одному человеку не роняет рассылку остальным."""
+    sent = 0
+    for c in await couples_full():
+        couple_id = int(c["couple_id"])
+        day = await checkin_day(couple_id)
+        for uid in (couple_id, int(c["partner_id"])):
+            if uid in day["answers"]:
+                continue                      # уже ответил сегодня
+            if await checkin_paused(uid):
+                continue                      # попросил не спрашивать
+            try:
+                await send_checkin(bot, uid)
+                sent += 1
+            except Exception:
+                logger.debug("checkin push failed for %s", uid, exc_info=True)
+    if sent:
+        logger.info("checkin tick: sent %s", sent)
+    return sent
 
 
 @checkin_router.message(Command("checkin"))

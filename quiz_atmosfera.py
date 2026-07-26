@@ -99,9 +99,14 @@ async def start_atm_quiz(message: Message, source: str | None = None,
 
 @atm_router.message(Command("dom"))
 async def cmd_dom(message: Message):
+    """Вход в тест. С 26.07.2026 ведёт в Mini App: тест живёт там, чтобы обе
+    половины пары шли одним путём и метрика «прошли тест» считалась в одном месте.
+    Чат-версия ниже сохранена как запасной путь и НЕ вызывается из команд/ссылок."""
     u = message.from_user
     await upsert_user(u.id, u.username, u.first_name)
-    await start_atm_quiz(message)
+    from handlers import APP_URL, OPEN_APP_TEXT, _app_keyboard
+    await message.answer(OPEN_APP_TEXT,
+                         reply_markup=_app_keyboard(f"{APP_URL}#/test", "Пройти тест"))
 
 
 @atm_router.callback_query(F.data == "atmq:go")

@@ -19,7 +19,7 @@ import os
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiohttp
 import aiosqlite
@@ -188,6 +188,12 @@ CREATE TABLE IF NOT EXISTS sixsec (
     weak TEXT,
     day INTEGER DEFAULT 0,
     last_sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS checkin_pause (
+    tg_id INTEGER PRIMARY KEY,
+    until TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1779,8 +1785,14 @@ async def atm_mark_nextday(tg_id: int):
 # Всё крэш-сейф по стилю atm_*: сбой деградирует фичу банка, не роняет поток.
 
 def _bank_day_key(day_key: str | None) -> str:
-    """day_key по умолчанию = сегодняшняя дата UTC (YYYY-MM-DD) — ключ идемпотентности."""
-    return day_key or datetime.utcnow().strftime("%Y-%m-%d")
+    """day_key по умолчанию = сегодняшняя дата по МОСКВЕ (YYYY-MM-DD) — ключ идемпотентности.
+
+    Почему не UTC (было до 26.07.2026): чек-ин задаётся вечером, а по UTC ответ
+    после 03:00 МСК падал бы в следующие сутки — партнёры отвечают «в один вечер»,
+    а система видела разные дни и парный gate не срабатывал. Аудитория в основном
+    СНГ, поэтому сутки считаем по Москве. То же правило продублировано в
+    functions/api/app.js (dayKey) — значения ОБЯЗАНЫ совпадать."""
+    return day_key or (datetime.utcnow() + timedelta(hours=3)).strftime("%Y-%m-%d")
 
 
 def _bank_ratio_str(plus: int, minus: int) -> str:
@@ -1957,6 +1969,47 @@ async def checkin_set(couple_id: int, tg_id: int, yes: bool,
             (couple_id, dk, tg_id, 1 if yes else 0))
     except Exception:
         logger.warning("checkin_set failed (continuing)", exc_info=True)
+
+
+async def checkin_pause_set(tg_id: int, days: int = 7) -> None:
+    """Поставить ежедневный чек-ин на паузу для одного человека.
+    Явный выход обязателен: ежедневная рассылка без кнопки «не спрашивать»
+    собирает жалобы на спам, а это прямой риск блокировки бота."""
+    until = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+    try:
+        await _exec(
+            "INSERT INTO checkin_pause (tg_id, until) VALUES (?, ?) "
+            "ON CONFLICT(tg_id) DO UPDATE SET until = excluded.until",
+            (tg_id, until))
+    except Exception:
+        logger.warning("checkin_pause_set failed (continuing)", exc_info=True)
+
+
+async def checkin_paused(tg_id: int) -> bool:
+    """Стоит ли пауза прямо сейчас. Крэш-сейф → False (лучше спросить, чем молчать)."""
+    try:
+        row = await _exec("SELECT until FROM checkin_pause WHERE tg_id = ?",
+                          (tg_id,), fetch="one")
+        if not row or not row.get("until"):
+            return False
+        return str(row["until"]) > _bank_day_key(None)
+    except Exception:
+        logger.warning("checkin_paused failed (continuing)", exc_info=True)
+        return False
+
+
+async def couples_full() -> list[dict]:
+    """Пары, где есть ОБА участника — только им шлём дневной чек-ин.
+    Одиночке вопрос про «поворот друг к другу» каждый вечер — напоминание об
+    одиночестве, а не ритуал (решение Кая 26.07)."""
+    try:
+        rows = await _exec(
+            "SELECT couple_id, partner_id FROM couples WHERE partner_id IS NOT NULL",
+            fetch="all")
+        return [dict(r) for r in (rows or [])]
+    except Exception:
+        logger.warning("couples_full failed (continuing)", exc_info=True)
+        return []
 
 
 async def checkin_day(couple_id: int, day_key: str | None = None) -> dict:
