@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from aiogram import Router, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    FSInputFile,
 )
 
 from database import log_event, para_save_result
@@ -61,6 +63,19 @@ _SHUFFLE_T2 = {
 
 STRATEGIES = ("priblizhenie", "otstranenie", "samocenzura", "kontrol",
               "podtverzhdenie")  # порядок вариантов вопросов теста 2
+
+# Картинка динамики под результатом теста 1 (файлы кладёт Кай):
+# assets/para/<ключ динамики>.jpg|png — dogoni, sosedi, hrupkiy, glavniy,
+# sliyanie, vybor. Нет файла → результат уходит без картинки (fail-open).
+_IMG_DIR = Path(__file__).parent / "assets" / "para"
+
+
+def _dynamic_image(key: str) -> Path | None:
+    for ext in (".jpg", ".jpeg", ".png"):
+        p = _IMG_DIR / f"{key}{ext}"
+        if p.exists():
+            return p
+    return None
 
 
 # ── Счёт ──────────────────────────────────────────────────────────────────────
@@ -268,6 +283,18 @@ async def _finish_t1(msg: Message, tg_id: int, st: dict):
         result += "\n\n" + d.SECONDARY_PREFIX + d.SECONDARY_NOTES[second]
     result += "\n\n" + d.DISCLAIMER
     await msg.edit_text(result, parse_mode=None)  # финал — в то же сообщение
+
+    # Картинка динамики — между результатом и крючком. Крэш-сейф: сбой или
+    # отсутствие файла не рвёт путь к тесту 2.
+    img = _dynamic_image(main)
+    if img:
+        try:
+            await msg.answer_photo(FSInputFile(img))
+            await log_event(tg_id, "para_img_shown", main)
+        except Exception:
+            logger.warning("para dynamic image send failed (continuing)",
+                           exc_info=True)
+
     await msg.answer(d.HOOK_TEXT, parse_mode=None,
                      reply_markup=_kbd([(d.HOOK_BTN, "par2:go")]))
 
