@@ -64,13 +64,25 @@ _SHUFFLE_T2 = {
 STRATEGIES = ("priblizhenie", "otstranenie", "samocenzura", "kontrol",
               "podtverzhdenie")  # порядок вариантов вопросов теста 2
 
-# Картинка динамики под результатом теста 1 (файлы кладёт Кай):
-# assets/para/<ключ динамики>.jpg|png — dogoni, sosedi, hrupkiy, glavniy,
-# sliyanie, vybor. Нет файла → результат уходит без картинки (fail-open).
+# Картинка под результатом теста 1 — инфографика стратегии, соответствующей
+# динамике по её ведущей шкале (файлы прислал Кай 13.08, assets/para/*.jpg).
+# У «vybor» пары нет, у «otstranenie» файла пока нет — уходит без картинки
+# (fail-open).
 _IMG_DIR = Path(__file__).parent / "assets" / "para"
 
+_DYNAMIC_IMG = {
+    "dogoni": "priblizhenie",     # ведущая шкала P
+    "sosedi": "otstranenie",      # D
+    "hrupkiy": "samocenzura",     # I
+    "glavniy": "kontrol",         # B
+    "sliyanie": "podtverzhdenie", # S
+}
 
-def _dynamic_image(key: str) -> Path | None:
+
+def _dynamic_image(dynamic: str) -> Path | None:
+    key = _DYNAMIC_IMG.get(dynamic)
+    if not key:
+        return None
     for ext in (".jpg", ".jpeg", ".png"):
         p = _IMG_DIR / f"{key}{ext}"
         if p.exists():
@@ -172,52 +184,20 @@ def _t2_screen(idx: int) -> tuple[str, InlineKeyboardMarkup]:
 # ── Вход и гейт подписки ──────────────────────────────────────────────────────
 
 async def start_para_quiz(message: Message, source: str | None = None):
-    """Вход из deeplink ?start=para (или para__<источник>). Retake разрешён."""
+    """Вход из deeplink ?start=para (или para__<источник>). Retake разрешён.
+
+    Тест 1 открыт всем — гейт подписки стоит перед тестом 2 (решение Кая
+    голосом 13.08: «пять вопросов даются только за подписку»).
+    """
     tg_id = message.from_user.id
     _active[tg_id] = {"idx": 0, "scores": {k: 0 for k in SCALES},
                       "source": source, "stage": "t1", "t2": {}}
     try:
-        await log_event(tg_id, "para_quiz_gate", source)
-    except Exception:
-        logger.debug("log_event para_quiz_gate failed", exc_info=True)
-
-    # Жёсткий гейт: тест выдаётся за подписку. None (бот не админ канала) —
-    # пропускаем, как в cb_check_sub: рост не блокируем из-за своей инфры.
-    from handlers import _is_subscribed, _CHANNEL_URL
-    sub = await _is_subscribed(message.bot, tg_id)
-    if sub is False:
-        await message.answer(d.GATE_TEXT, parse_mode=None,
-                             reply_markup=_gate_kbd(_CHANNEL_URL))
-        return
-    await _send_intro(message, tg_id)
-
-
-async def _send_intro(message: Message, tg_id: int):
-    try:
-        await log_event(tg_id, "para_quiz_start",
-                        (_active.get(tg_id) or {}).get("source"))
+        await log_event(tg_id, "para_quiz_start", source)
     except Exception:
         logger.debug("log_event para_quiz_start failed", exc_info=True)
     await message.answer(d.T1_INTRO, parse_mode=None,
                          reply_markup=_kbd([(d.T1_BTN_GO, "paq:go")]))
-
-
-@para_router.callback_query(F.data == "paq:sub")
-async def cb_gate_check(cb: CallbackQuery):
-    from handlers import _is_subscribed
-    sub = await _is_subscribed(cb.bot, cb.from_user.id)
-    if sub is False:
-        await cb.answer(d.GATE_RETRY, show_alert=True)
-        return
-    try:
-        await log_event(cb.from_user.id, "para_sub_confirmed")
-    except Exception:
-        logger.debug("log_event para_sub_confirmed failed", exc_info=True)
-    await cb.answer()
-    if cb.from_user.id not in _active:
-        _active[cb.from_user.id] = {"idx": 0, "scores": {k: 0 for k in SCALES},
-                                    "source": None, "stage": "t1", "t2": {}}
-    await _send_intro(cb.message, cb.from_user.id)
 
 
 # ── Тест 1 ────────────────────────────────────────────────────────────────────
@@ -303,6 +283,39 @@ async def _finish_t1(msg: Message, tg_id: int, st: dict):
 
 @para_router.callback_query(F.data == "par2:go")
 async def cb_t2_go(cb: CallbackQuery):
+    # Гейт подписки: роль и практика — за подписку на канал. None (бот не
+    # админ канала — проверить нельзя) пропускаем, как в cb_check_sub:
+    # рост не блокируем из-за своей инфры.
+    from handlers import _is_subscribed, _CHANNEL_URL
+    sub = await _is_subscribed(cb.bot, cb.from_user.id)
+    if sub is False:
+        try:
+            await log_event(cb.from_user.id, "para_quiz_gate")
+        except Exception:
+            logger.debug("log_event para_quiz_gate failed", exc_info=True)
+        await cb.message.answer(d.GATE_TEXT, parse_mode=None,
+                                reply_markup=_gate_kbd(_CHANNEL_URL))
+        await cb.answer()
+        return
+    await _t2_begin(cb)
+
+
+@para_router.callback_query(F.data == "paq:sub")
+async def cb_gate_check(cb: CallbackQuery):
+    """«Я в канале» на гейте перед тестом 2 — проверяем и продолжаем с места."""
+    from handlers import _is_subscribed
+    sub = await _is_subscribed(cb.bot, cb.from_user.id)
+    if sub is False:
+        await cb.answer(d.GATE_RETRY, show_alert=True)
+        return
+    try:
+        await log_event(cb.from_user.id, "para_sub_confirmed")
+    except Exception:
+        logger.debug("log_event para_sub_confirmed failed", exc_info=True)
+    await _t2_begin(cb)
+
+
+async def _t2_begin(cb: CallbackQuery):
     st = _active.get(cb.from_user.id)
     if st is None:
         # Рестарт контейнера между тестами: роль считаем с чистого листа,
