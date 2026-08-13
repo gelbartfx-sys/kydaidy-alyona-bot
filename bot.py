@@ -38,6 +38,7 @@ from growth_agent import growth_router, run_growth_tick
 from followup import run_followup_tick
 from nurture import run_nurture_tick
 from quiz_atmosfera import atm_router, run_atm_nextday_tick
+from quiz_para import para_router
 from sixsec import sixsec_router, run_sixsec_tick
 from checkin import checkin_router, run_checkin_tick
 from webhooks import setup_webhooks
@@ -154,6 +155,9 @@ async def main():
     # atm_router (тест «Атмосфера дома», E1/T1): /dom + callback'и atmq:* —
     # раньше главного router, чтобы /dom не съел catch-all fallback.
     dp.include_router(atm_router)
+    # para_router (лидмагнит «Какой тип отношений в вашей паре?», 13.08):
+    # только callback'и paq:*/par2:* — текст-фильтров нет, конфликтов нет.
+    dp.include_router(para_router)
     # sixsec_router («6 секунд», on-ramp): callback'и six:* — раньше главного
     # router, чтобы не съел catch-all fallback. Инвайт в конце реюзит atmq:invite
     # (в atm_router выше). Только callback'и, текст-фильтров нет — конфликтов нет.

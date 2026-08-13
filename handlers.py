@@ -347,6 +347,17 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
                 reply_markup=_app_keyboard(f"{APP_URL}?pair={int(uid)}#/test",
                                            "Пройти тест"))
             return
+    # Лидмагнит «Какой тип отношений в вашей паре?» (13.08): ?start=para
+    # (+ суффикс источника para__pin). ВАЖНО: ДО _split_source — бэр-токен
+    # «para» атрибуция съела бы как метку источника.
+    if args == "para" or args.startswith("para__"):
+        _, source = _split_source(args)
+        await upsert_user(user.id, user.username, user.first_name)
+        await set_user_source(user.id, source or "para")
+        from quiz_para import start_para_quiz
+        await start_para_quiz(message, source or "para")
+        return
+
     # Соло-вход: ?start=test | yt* | pin* → сразу тест (мандат ТЗ E1 22.07).
     if args == "test" or args.startswith(("yt", "pin")):
         _, source = _split_source(args)

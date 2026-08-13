@@ -79,3 +79,11 @@ CREATE TABLE IF NOT EXISTS atm_quiz (
     nextday_sent INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS para_quiz (
+    tg_id INTEGER PRIMARY KEY,
+    scores TEXT,
+    dynamic TEXT,
+    dynamic2 TEXT,
+    strategy TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

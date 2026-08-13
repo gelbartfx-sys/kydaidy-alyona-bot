@@ -167,6 +167,15 @@ CREATE TABLE IF NOT EXISTS atm_quiz (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS para_quiz (
+    tg_id INTEGER PRIMARY KEY,
+    scores TEXT,
+    dynamic TEXT,
+    dynamic2 TEXT,
+    strategy TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS couples (
     couple_id INTEGER PRIMARY KEY,
     partner_id INTEGER,
@@ -481,6 +490,17 @@ _RUNTIME_MIGRATIONS = (
         weak TEXT,
         day INTEGER DEFAULT 0,
         last_sent_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    # ── Лидмагнит «Какой тип отношений в вашей паре?» (13.08): два теста.
+    # PRIMARY KEY tg_id — retake перезаписывает. dynamic/dynamic2 — тест 1,
+    # strategy — тест 2 (роль в цикле). Числа шкал наружу не выходят.
+    """CREATE TABLE IF NOT EXISTS para_quiz (
+        tg_id INTEGER PRIMARY KEY,
+        scores TEXT,
+        dynamic TEXT,
+        dynamic2 TEXT,
+        strategy TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
 )
@@ -1777,6 +1797,37 @@ async def atm_mark_nextday(tg_id: int):
                     (tg_id,))
     except Exception:
         logger.warning("atm_mark_nextday failed (continuing)", exc_info=True)
+
+
+# ── Лидмагнит «Какой тип отношений в вашей паре?» (13.08) ────────────────────
+
+async def para_save_result(tg_id: int, scores_json: str, dynamic: str | None,
+                           dynamic2: str | None, strategy: str | None):
+    """Upsert результата лидмагнита. Вызывается дважды: после теста 1
+    (dynamic задан, strategy None) и после теста 2 (strategy задан; dynamic
+    может быть None, если контейнер рестартовал между тестами, — тогда
+    сохранённые dynamic/dynamic2 не затираем)."""
+    await _exec(
+        "INSERT INTO para_quiz (tg_id, scores, dynamic, dynamic2, strategy, "
+        "created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(tg_id) DO UPDATE SET "
+        "scores = excluded.scores, "
+        "dynamic = COALESCE(excluded.dynamic, para_quiz.dynamic), "
+        "dynamic2 = CASE WHEN excluded.dynamic IS NOT NULL "
+        "           THEN excluded.dynamic2 ELSE para_quiz.dynamic2 END, "
+        "strategy = COALESCE(excluded.strategy, para_quiz.strategy), "
+        "created_at = CURRENT_TIMESTAMP",
+        (tg_id, scores_json, dynamic, dynamic2, strategy))
+
+
+async def para_get_result(tg_id: int):
+    """Результат лидмагнита юзера → dict | None. Крэш-сейф (нет таблицы → None)."""
+    try:
+        return await _exec("SELECT * FROM para_quiz WHERE tg_id = ?",
+                           (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("para_get_result failed (continuing)", exc_info=True)
+        return None
 
 
 # ── Сквозной Банк 5:1 (Шаг 1, спина кольца) ──────────────────────────────────
