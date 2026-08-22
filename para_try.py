@@ -58,8 +58,6 @@ def run(t1_letters: str, t1_scale: str, t2_letters: str):
         result += "\n\n" + d.SECONDARY_PREFIX + d.SECONDARY_NOTES[second]
     print(f"{RULE}\nРЕЗУЛЬТАТ ТЕСТА 1   (шкалы: {scores})\n{RULE}")
     print(result + "\n\n" + d.DISCLAIMER + "\n")
-    img = q._dynamic_image(main)
-    print(f"[картинка динамики: {img if img else 'НЕТ ФАЙЛА — экран пропускается'}]\n")
     print(f"{d.HOOK_TEXT}\n\n[{d.HOOK_BTN}]\n")
 
     print(f"{RULE}\nГЕЙТ ПОДПИСКИ (в боте здесь проверяется членство в канале)\n{RULE}")
@@ -78,6 +76,8 @@ def run(t1_letters: str, t1_scale: str, t2_letters: str):
     strat = q.pick_strategy(counts)
     print(f"{RULE}\nРЕЗУЛЬТАТ ТЕСТА 2   (голоса: {counts})\n{RULE}")
     print(d.STRATEGY_TEXTS[strat] + "\n")
+    img = q._strategy_image(strat)
+    print(f"[картинка роли: {img if img else 'НЕТ ФАЙЛА — экран пропускается'}]\n")
     print(f"{d.PRACTICE_HEADER}.\n\n{d.PRACTICES[strat]}\n")
     print(f"{d.BRIDGE_TEXT}\n\n[{d.BRIDGE_BTN}]")
 

@@ -64,27 +64,18 @@ _SHUFFLE_T2 = {
 STRATEGIES = ("priblizhenie", "otstranenie", "samocenzura", "kontrol",
               "podtverzhdenie")  # порядок вариантов вопросов теста 2
 
-# Картинка под результатом теста 1 — инфографика стратегии, соответствующей
-# динамике по её ведущей шкале (файлы прислал Кай 13.08, assets/para/*.jpg).
-# У «vybor» пары нет, у «otstranenie» файла пока нет — уходит без картинки
-# (fail-open).
+# Инфографика роли — под результатом ТЕСТА 2 (мандат Кая 22.08: пять картинок
+# по пяти стратегиям, показывать только после короткого теста). Имя файла =
+# ключ стратегии, посредник-маппинг не нужен: assets/para/<стратегия>.jpg.
+# Файла нет → экран пропускается (fail-open), путь к практике не рвётся.
 _IMG_DIR = Path(__file__).parent / "assets" / "para"
 
-_DYNAMIC_IMG = {
-    "dogoni": "priblizhenie",     # ведущая шкала P
-    "sosedi": "otstranenie",      # D
-    "hrupkiy": "samocenzura",     # I
-    "glavniy": "kontrol",         # B
-    "sliyanie": "podtverzhdenie", # S
-}
 
-
-def _dynamic_image(dynamic: str) -> Path | None:
-    key = _DYNAMIC_IMG.get(dynamic)
-    if not key:
+def _strategy_image(strategy: str) -> Path | None:
+    if strategy not in STRATEGIES:
         return None
     for ext in (".jpg", ".jpeg", ".png"):
-        p = _IMG_DIR / f"{key}{ext}"
+        p = _IMG_DIR / f"{strategy}{ext}"
         if p.exists():
             return p
     return None
@@ -264,17 +255,6 @@ async def _finish_t1(msg: Message, tg_id: int, st: dict):
     result += "\n\n" + d.DISCLAIMER
     await msg.edit_text(result, parse_mode=None)  # финал — в то же сообщение
 
-    # Картинка динамики — между результатом и крючком. Крэш-сейф: сбой или
-    # отсутствие файла не рвёт путь к тесту 2.
-    img = _dynamic_image(main)
-    if img:
-        try:
-            await msg.answer_photo(FSInputFile(img))
-            await log_event(tg_id, "para_img_shown", main)
-        except Exception:
-            logger.warning("para dynamic image send failed (continuing)",
-                           exc_info=True)
-
     await msg.answer(d.HOOK_TEXT, parse_mode=None,
                      reply_markup=_kbd([(d.HOOK_BTN, "par2:go")]))
 
@@ -383,6 +363,18 @@ async def _finish_t2(msg: Message, tg_id: int, st: dict):
         logger.debug("log_event para_t2_done failed", exc_info=True)
 
     await msg.edit_text(d.STRATEGY_TEXTS[strat], parse_mode=None)
+
+    # Картинка роли — между расшифровкой и практикой. Крэш-сейф: сбой или
+    # отсутствие файла не рвёт путь к практике и мосту в канал.
+    img = _strategy_image(strat)
+    if img:
+        try:
+            await msg.answer_photo(FSInputFile(img))
+            await log_event(tg_id, "para_img_shown", strat)
+        except Exception:
+            logger.warning("para strategy image send failed (continuing)",
+                           exc_info=True)
+
     await msg.answer(f"{d.PRACTICE_HEADER}.\n\n{d.PRACTICES[strat]}",
                      parse_mode=None)
 
@@ -448,5 +440,13 @@ if __name__ == "__main__":
     # у каждой стратегии — расшифровка и практика.
     assert set(d.RESULTS) == set(d.DYNAMIC_NAMES) == set(d.SECONDARY_NOTES)
     assert set(d.STRATEGY_TEXTS) == set(d.PRACTICES) == set(STRATEGIES)
+
+    # Картинки — только роли. Ключ динамики файла дать не должен: после
+    # переноса 22.08 экран с картинкой живёт лишь в финале теста 2.
+    assert _strategy_image("dogoni") is None
+    have = [s for s in STRATEGIES if _strategy_image(s)]
+    missing = [s for s in STRATEGIES if not _strategy_image(s)]
+    print(f"картинки ролей: есть {len(have)}/5"
+          + (f", НЕТ: {', '.join(missing)}" if missing else ""))
 
     print("quiz_para self-check OK")
