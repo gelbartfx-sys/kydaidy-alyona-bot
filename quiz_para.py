@@ -435,6 +435,11 @@ if __name__ == "__main__":
         text, kbd = _t2_screen(i)
         assert text and kbd.inline_keyboard
 
+    # Тест 2: каждая стратегия встречается ровно по разу в каждом вопросе —
+    # требование равномерности шкалы (в каркасе GPT она ломалась: два
+    # «контроля» в одном вопросе). Здесь это несёт тип: индекс = шкала.
+    assert all(len(q["options"]) == len(STRATEGIES) for q in d.T2_QUESTIONS)
+
     # Тест 2: ведущая стратегия и детерминированный tie-break.
     assert pick_strategy({"kontrol": 3, "otstranenie": 2}) == "kontrol"
     assert pick_strategy({"priblizhenie": 2, "kontrol": 2}) == "priblizhenie"
