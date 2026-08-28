@@ -345,6 +345,14 @@ async def cb_t2_answer(cb: CallbackQuery):
         _active.pop(cb.from_user.id, None)
 
 
+@para_router.callback_query(F.data == "para:vhod")
+async def cb_vhod(cb: CallbackQuery):
+    """Вход в тест с приветственного экрана бота. Отдельная дверь от диплинка:
+    источник помечается «bot», чтобы в воронке было видно, кто пришёл без ссылки."""
+    await cb.answer()
+    await start_para_quiz(cb.message, "bot")
+
+
 @para_router.callback_query(F.data == "drip_practice")
 async def cb_drip_practice(cb: CallbackQuery):
     """Кнопка третьего дня цепочки: показать практику ещё раз.
