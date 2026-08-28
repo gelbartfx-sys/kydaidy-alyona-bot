@@ -252,8 +252,13 @@ def test_full_path_to_money():
                 and {CLUB_URL, ONE_ON_ONE_URL} <= _doors(m)[0]
                 and "alena:more" in _doors(m)[1]]
         assert full, "нет клавиатуры с Клуб+1:1+alena:more"
-        # (6) followup-серия поставлена
-        assert await _count_followups(uid) > 0, "followups не поставлены"
+        # (6) followup-серия НЕ поставлена (мандат Кая 28.08). Серия вела на
+        # Клуб «Манифест» 990 ₽ — продукт закрытой воронки, и уходила живым
+        # людям. Обязанность перевёрнута: раньше сторож требовал, чтобы серия
+        # ставилась, теперь требует, чтобы её не было. Вернуть проверку в
+        # прежний вид можно только вместе с текстами дожима под новые продукты.
+        assert await _count_followups(uid) == 0, \
+            "followup-серия поставлена — она ведёт на закрытый продукт"
     try:
         asyncio.run(_run())
     finally:
@@ -371,7 +376,9 @@ def test_dead_session_closes_with_offer():
         # Оффер-тизер ушёл ВДОГОНКУ (фон → send_voice_to).
         assert any(t == _OFFER_TEASER for _, t, _ in rec.voice_to), "оффер не отправлен"
         assert rec.kruzhok, "оффер-кружок вдогонку не собран"
-        assert await _count_followups(uid) > 0, "followups не поставлены"
+        # Мандат Кая 28.08: серия дожима снята вместе с закрытым продуктом.
+        assert await _count_followups(uid) == 0, \
+            "followup-серия поставлена — она ведёт на закрытый продукт"
         # Сирена админу.
         assert any(cid == _ADMIN_ID and t and "умерла" in t
                    for cid, t, _ in bot.messages), "нет алерта админу"

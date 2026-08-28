@@ -358,6 +358,16 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await start_para_quiz(message, source or "para")
         return
 
+    # Заявка на «Разбор сценария отношений» (28.08): ?start=razbor
+    # (+ суффикс источника razbor__site). Как и para — ДО _split_source.
+    if args == "razbor" or args.startswith("razbor__"):
+        _, source = _split_source(args)
+        await upsert_user(user.id, user.username, user.first_name)
+        await set_user_source(user.id, source or "razbor")
+        from razbor import show_intro
+        await show_intro(message, user.id, source or "razbor")
+        return
+
     # Соло-вход: ?start=test | yt* | pin* → сразу тест (мандат ТЗ E1 22.07).
     if args == "test" or args.startswith(("yt", "pin")):
         _, source = _split_source(args)

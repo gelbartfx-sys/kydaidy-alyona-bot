@@ -345,6 +345,29 @@ async def cb_t2_answer(cb: CallbackQuery):
         _active.pop(cb.from_user.id, None)
 
 
+@para_router.callback_query(F.data == "drip_practice")
+async def cb_drip_practice(cb: CallbackQuery):
+    """Кнопка третьего дня цепочки: показать практику ещё раз.
+
+    Практика берётся из сохранённого результата, а не из памяти процесса:
+    между тестом и третьим днём контейнер успевает перезапуститься не раз.
+    """
+    await cb.answer()
+    from database import para_get_result
+    row = await para_get_result(cb.from_user.id)
+    strat = (row["strategy"] if row else None) or ""
+    text = d.PRACTICES.get(strat)
+    if not text:
+        await cb.message.answer(d.HOOK_TEXT, parse_mode=None,
+                                reply_markup=_kbd([(d.HOOK_BTN, "par2:go")]))
+        return
+    await cb.message.answer(f"{d.PRACTICE_HEADER}.\n\n{text}", parse_mode=None)
+    try:
+        await log_event(cb.from_user.id, "para_practice_reopened", strat)
+    except Exception:
+        logger.debug("log_event para_practice_reopened failed", exc_info=True)
+
+
 def pick_strategy(counts: dict[str, int]) -> str:
     """Ведущая стратегия: максимум голосов, при равенстве — порядок STRATEGIES."""
     return max(STRATEGIES, key=lambda s: counts.get(s, 0))

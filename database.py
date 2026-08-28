@@ -285,6 +285,20 @@ async def _exec(sql: str, params: tuple = (), fetch: str = "none"):
 # Идемпотентные DDL новых таблиц — докатываются в D1 прямо из рантайма
 # (креды D1 уже есть), чтобы не требовать ручного wrangler d1 execute.
 _RUNTIME_MIGRATIONS = (
+    # ── Воронка «Сценарий отношений» (мандат Кая 28.08) ─────────────────────
+    # drip_day — последний отправленный день цепочки (0 = ещё ни одного),
+    # drip_at — время этой отправки. Оба живут в para_quiz, потому что
+    # цепочка идёт строго после теста 2 и умирает вместе с его результатом.
+    "ALTER TABLE para_quiz ADD COLUMN drip_day INTEGER DEFAULT 0",
+    "ALTER TABLE para_quiz ADD COLUMN drip_at TIMESTAMP",
+    # Заявки на «Разбор сценария отношений». answers — три ответа JSON-списком.
+    """CREATE TABLE IF NOT EXISTS razbor_zayavki (
+        tg_id INTEGER PRIMARY KEY,
+        username TEXT,
+        answers TEXT,
+        status TEXT DEFAULT 'new',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
     """CREATE TABLE IF NOT EXISTS ai_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tg_id INTEGER,
@@ -2133,3 +2147,75 @@ async def sixsec_advance(tg_id: int, day: int):
             (int(day), tg_id))
     except Exception:
         logger.warning("sixsec_advance failed (continuing)", exc_info=True)
+
+
+# ── Воронка «Сценарий отношений»: цепочка 7 дней и заявки на разбор ──────────
+
+async def drip_due(limit: int = 50):
+    """Кому пора следующий день цепочки: тест 2 пройден, сутки с прошлой
+    отправки истекли, семь дней ещё не выданы. Крэш-сейф (нет колонок → []).
+
+    Отсчёт первого дня идёт от created_at (момента результата), дальше —
+    от drip_at. Иначе после рестарта все получили бы день 1 одновременно."""
+    try:
+        return await _exec(
+            "SELECT tg_id, dynamic, strategy, COALESCE(drip_day, 0) AS drip_day "
+            "FROM para_quiz WHERE strategy IS NOT NULL "
+            "AND COALESCE(drip_day, 0) < 7 "
+            "AND datetime(COALESCE(drip_at, created_at), '+20 hours') < datetime('now') "
+            f"LIMIT {int(limit)}", fetch="all") or []
+    except Exception:
+        logger.warning("drip_due failed (continuing)", exc_info=True)
+        return []
+
+
+async def drip_advance(tg_id: int, day: int):
+    """Отметить день цепочки ДО отправки — антидубль при падении отправки."""
+    try:
+        await _exec(
+            "UPDATE para_quiz SET drip_day = ?, drip_at = CURRENT_TIMESTAMP "
+            "WHERE tg_id = ?", (int(day), tg_id))
+    except Exception:
+        logger.warning("drip_advance failed (continuing)", exc_info=True)
+
+
+async def drip_stop(tg_id: int):
+    """Погасить цепочку (юзер заблокировал бота или отписался)."""
+    try:
+        await _exec("UPDATE para_quiz SET drip_day = 7 WHERE tg_id = ?", (tg_id,))
+    except Exception:
+        logger.warning("drip_stop failed (continuing)", exc_info=True)
+
+
+async def razbor_save(tg_id: int, username: str | None, answers_json: str):
+    """Заявка на разбор. Повторная заявка перезаписывает ответы, но статус
+    не сбрасывает — иначе обработанная заявка вернулась бы в «новые»."""
+    try:
+        await _exec(
+            "INSERT INTO razbor_zayavki (tg_id, username, answers) "
+            "VALUES (?, ?, ?) ON CONFLICT(tg_id) DO UPDATE SET "
+            "username = excluded.username, answers = excluded.answers, "
+            "created_at = CURRENT_TIMESTAMP",
+            (tg_id, username, answers_json))
+    except Exception:
+        logger.warning("razbor_save failed (continuing)", exc_info=True)
+
+
+async def razbor_get(tg_id: int):
+    """Заявка юзера → row | None. Крэш-сейф."""
+    try:
+        return await _exec("SELECT * FROM razbor_zayavki WHERE tg_id = ?",
+                           (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("razbor_get failed (continuing)", exc_info=True)
+        return None
+
+
+async def razbor_count() -> int:
+    """Сколько заявок всего — по нему считаются оставшиеся бесплатные места."""
+    try:
+        row = await _exec("SELECT COUNT(*) AS n FROM razbor_zayavki", fetch="one")
+        return int(row["n"]) if row else 0
+    except Exception:
+        logger.warning("razbor_count failed (continuing)", exc_info=True)
+        return 0

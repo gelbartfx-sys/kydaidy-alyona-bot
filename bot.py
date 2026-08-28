@@ -35,8 +35,6 @@ from booking import book_router
 from calendly import reconcile_tick as calendly_reconcile_tick
 from curator import curator_router, push_daily_batch, publish_tick
 from growth_agent import growth_router, run_growth_tick
-from followup import run_followup_tick
-from nurture import run_nurture_tick
 from quiz_atmosfera import atm_router, run_atm_nextday_tick
 from quiz_para import para_router
 from sixsec import sixsec_router, run_sixsec_tick
@@ -158,6 +156,11 @@ async def main():
     # para_router (лидмагнит «Какой тип отношений в вашей паре?», 13.08):
     # только callback'и paq:*/par2:* — текст-фильтров нет, конфликтов нет.
     dp.include_router(para_router)
+
+    # Заявка на «Разбор сценария отношений» (28.08). После para_router:
+    # узкий сборщик ответов не должен перехватывать прохождение теста.
+    from razbor import razbor_router
+    dp.include_router(razbor_router)
     # sixsec_router («6 секунд», on-ramp): callback'и six:* — раньше главного
     # router, чтобы не съел catch-all fallback. Инвайт в конце реюзит atmq:invite
     # (в atm_router выше). Только callback'и, текст-фильтров нет — конфликтов нет.
@@ -170,7 +173,10 @@ async def main():
 
     # Запуск nurture-tick каждый час
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(run_nurture_tick, "interval", hours=1, args=[bot])
+    # Цепочка 7 дней воронки «Сценарий отношений» (28.08). Старая
+    # nurture-серия по «5 поворотам» снята: воронка «Манифест» закрыта.
+    from drip_para import run_drip_tick
+    scheduler.add_job(run_drip_tick, "interval", hours=1, args=[bot])
     # Контент-конвейер: утренняя рассылка батча куратору + дрип-автопостинг в канал.
     scheduler.add_job(
         push_daily_batch, "cron",
@@ -208,9 +214,11 @@ async def main():
     scheduler.add_job(run_club_ladder_tick, "interval", hours=24, args=[bot])
     # Волна 1 (H6/H7): дожим после оффера — серия из 3 касаний (45м/24ч/72ч).
     # Оплатившие отфильтровываются в самом запросе; no-op при FOLLOWUP_ENABLED=0.
-    scheduler.add_job(
-        run_followup_tick, "interval",
-        minutes=settings.followup_tick_min, args=[bot])
+    # СНЯТО 28.08 (мандат Кая): дожим слал живым людям оффер закрытой
+    # воронки — Клуб «Манифест» 990 ₽. Продукты новые, тексты дожима под них
+    # ещё не написаны; молчание лучше неверного оффера.
+    # scheduler.add_job(run_followup_tick, "interval",
+    #                   minutes=settings.followup_tick_min, args=[bot])
     # Тест «Атмосфера дома»: next-day чек ~20 ч после прохождения (E1/T1).
     scheduler.add_job(run_atm_nextday_tick, "interval", minutes=30, args=[bot])
     # «6 секунд» (Шаг 2, on-ramp): вечера 2–3 через ~20 ч после предыдущего.
