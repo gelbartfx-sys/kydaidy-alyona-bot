@@ -166,7 +166,7 @@ async def run_dnevnik_itog_tick(bot: Bot) -> None:
         try:
             await bot.send_message(
                 tg_id, f"{ITOG_ZAGOLOVOK}.\n\n{srez}\n\n"
-                "Разбор — 90 минут лично с Алёной. Первые десять бесплатно.",
+                "Разбор — двадцать минут лично с Алёной, видеозвонком. Первые десять бесплатно.",
                 parse_mode=None, reply_markup=_kbd(ITOG_BTN, "#/zayavka"))
             await log_event(tg_id, "dnevnik_itog", str(len(otmetki)))
         except Exception:

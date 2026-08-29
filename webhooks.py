@@ -13,10 +13,9 @@ from datetime import datetime
 from aiohttp import web
 from aiogram import Bot
 
-from urllib.parse import quote
 
 from config import settings
-from database import (add_purchase, add_subscription, get_user,
+from database import (add_purchase, add_subscription,
                       set_oneonone, get_oneonone, deactivate_subscription, log_event)
 
 logger = logging.getLogger(__name__)
@@ -247,27 +246,6 @@ _BASE_TEXTS = {
         "Напиши мне сюда: @kydaidy — согласуем время лично."
     ),
 }
-
-
-async def _calendly_link_for(tg_id: int) -> str | None:
-    """Ссылка на календарь Алёны для записи 1:1, с префиллом темы запроса.
-
-    Запрос, вскрытый на AI-встрече, подставляем в первый кастомный вопрос
-    Calendly (?a1=...). Нет настроенного календаря — None (fallback на текст).
-    """
-    base = settings.calendly_1on1_url
-    if not base:
-        return None
-    request = None
-    try:
-        u = await get_user(tg_id)
-        request = (u or {}).get("last_ai_request")
-    except Exception:
-        logger.warning("calendly prefill: get_user failed (continuing)", exc_info=True)
-    if request:
-        sep = "&" if "?" in base else "?"
-        return f"{base}{sep}a1={quote(request)}"
-    return base
 
 
 async def _create_personal_invite(bot: Bot, channel_id: int, tg_id: int, product_code: str) -> str | None:

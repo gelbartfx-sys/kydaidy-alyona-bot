@@ -8,6 +8,9 @@
 первые десять разборов бесплатные, дальше 7 000 ₽ — цена названа сразу,
 чтобы бесплатное место не выглядело приманкой.
 
+Время встречи человек выбирает сам, здесь же (29.08, вместо Calendly):
+заявка и запись — один путь, а не «оставь заявку и жди, когда напишут».
+
 Прохождение держим в памяти процесса, как в quiz_para: заявка пишется
 за одну сессию, а рестарт контейнера лечится повторным /razbor.
 """
@@ -24,6 +27,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
 
 from config import settings
 from database import razbor_save, razbor_get, razbor_count, log_event
+from vstrecha import kbd_zapis
 import quiz_para_data as d
 
 logger = logging.getLogger(__name__)
@@ -55,7 +59,8 @@ async def _slots_line() -> str:
 async def show_intro(msg: Message, tg_id: int, source: str = ""):
     """Экран продукта. Единственная дверь для всех трёх входов."""
     if await razbor_get(tg_id):
-        await msg.answer(d.RAZBOR_ALREADY, parse_mode=None)
+        await msg.answer(d.RAZBOR_ALREADY, parse_mode=None,
+                         reply_markup=kbd_zapis())
         return
     await msg.answer(f"{d.RAZBOR_INTRO}\n\n{await _slots_line()}",
                      parse_mode=None, reply_markup=_intro_kbd())
@@ -81,7 +86,8 @@ async def cb_razbor_go(cb: CallbackQuery):
     await cb.answer()
     tg_id = cb.from_user.id
     if await razbor_get(tg_id):
-        await cb.message.answer(d.RAZBOR_ALREADY, parse_mode=None)
+        await cb.message.answer(d.RAZBOR_ALREADY, parse_mode=None,
+                                reply_markup=kbd_zapis())
         return
     _active[tg_id] = {"idx": 0, "answers": []}
     await cb.message.answer(d.RAZBOR_Q[0], parse_mode=None)
@@ -110,7 +116,7 @@ async def collect(msg: Message):
     username = msg.from_user.username
     await razbor_save(tg_id, username, json.dumps(st["answers"],
                                                  ensure_ascii=False))
-    await msg.answer(d.RAZBOR_DONE, parse_mode=None)
+    await msg.answer(d.RAZBOR_DONE, parse_mode=None, reply_markup=kbd_zapis())
     try:
         await log_event(tg_id, "razbor_done")
     except Exception:
@@ -138,4 +144,8 @@ if __name__ == "__main__":
     assert all(len(t) < 4096 for t in
                (d.RAZBOR_INTRO, d.RAZBOR_DONE, d.RAZBOR_ALREADY, *d.RAZBOR_Q))
     assert FREE_SLOTS == 10
+    # Дверь в запись висит на всех трёх исходах экрана — иначе заявка снова
+    # заканчивалась бы ожиданием, что Алёна напишет первой.
+    assert "vst:zapis" == kbd_zapis().inline_keyboard[0][0].callback_data
+    assert "двадцать минут" in d.RAZBOR_INTRO, "длительность — решение Кая 29.08"
     print("razbor self-check OK")

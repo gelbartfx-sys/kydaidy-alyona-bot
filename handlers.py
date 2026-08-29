@@ -404,6 +404,7 @@ async def cmd_help(message: Message):
         "*Команды бота*\n\n"
         "/start — начать сначала\n"
         "/razbor — записаться на разбор сценария отношений\n"
+        "/vstrecha — время встречи: выбрать, перенести, отменить\n"
         "/dnevnik — дневник отношений на неделю\n"
         "/help — эта справка",
         parse_mode="Markdown",

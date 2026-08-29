@@ -237,6 +237,26 @@ CREATE TABLE IF NOT EXISTS dnevnik_otmetki (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(tg_id, slot)
 );
+
+-- Запись на встречу (мандат Кая 29.08.2026, вместо Calendly).
+-- nachalo — 'YYYY-MM-DD HH:MM' в UTC: единственное представление времени в базе,
+-- пояс человека (tz_min) хранится рядом только для показа и напоминания.
+CREATE TABLE IF NOT EXISTS vstrechi (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER NOT NULL,
+    username TEXT,
+    nachalo TEXT NOT NULL,
+    tz_min INTEGER DEFAULT 180,
+    status TEXT DEFAULT 'booked',
+    napomnil_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Двойная бронь запрещена базой, а не порядком вызовов в коде: проверка
+-- «свободно?» и запись — два разных запроса, между ними влезает второй человек.
+-- Индекс частичный: отменённая бронь освобождает слот.
+CREATE UNIQUE INDEX IF NOT EXISTS vstrechi_slot_zanyat
+    ON vstrechi(nachalo) WHERE status = 'booked';
 """
 
 
@@ -562,6 +582,20 @@ _RUNTIME_MIGRATIONS = (
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(tg_id, slot)
     )""",
+    # Запись на встречу (29.08). Индекс — не украшение: он и есть защита от
+    # двойной брони, см. комментарий в SCHEMA.
+    """CREATE TABLE IF NOT EXISTS vstrechi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL,
+        username TEXT,
+        nachalo TEXT NOT NULL,
+        tz_min INTEGER DEFAULT 180,
+        status TEXT DEFAULT 'booked',
+        napomnil_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS vstrechi_slot_zanyat
+        ON vstrechi(nachalo) WHERE status = 'booked'""",
 )
 
 
@@ -2238,3 +2272,109 @@ async def dnevnik_itog_otmetit(tg_id: int):
         await _exec("UPDATE dnevnik SET itog_sent = 1 WHERE tg_id = ?", (tg_id,))
     except Exception:
         logger.warning("dnevnik_itog_otmetit failed (continuing)", exc_info=True)
+
+
+# ── ЗАПИСЬ НА ВСТРЕЧУ (29.08.2026, вместо Calendly) ──────────────────────────
+#
+# Время в базе живёт ТОЛЬКО в UTC строкой 'YYYY-MM-DD HH:MM'. Формат выбран
+# сортируемым лексикографически: сравнения по окну («ближайший час») делаются
+# обычным BETWEEN и работают одинаково в SQLite и в D1.
+#
+# Двойную бронь держит частичный UNIQUE-индекс vstrechi_slot_zanyat, а не
+# порядок вызовов: между «свободно?» и «пишу» влезает второй человек, и никакая
+# аккуратность в коде этого не закрывает.
+
+async def vstrecha_zanyatye(ot: str, do: str) -> set[str]:
+    """Занятые начала в окне [ot, do] — множество ключей UTC. Крэш-сейф: при
+    сбое возвращаем пустое множество, но бронь всё равно не пройдёт мимо
+    индекса — человек увидит «время только что заняли», а не двойную встречу."""
+    try:
+        rows = await _exec(
+            "SELECT nachalo FROM vstrechi WHERE status = 'booked' "
+            "AND nachalo >= ? AND nachalo <= ?", (ot, do), fetch="all") or []
+        return {str(r["nachalo"]) for r in rows}
+    except Exception:
+        logger.warning("vstrecha_zanyatye failed (continuing)", exc_info=True)
+        return set()
+
+
+async def vstrecha_zabronirovat(tg_id: int, username: str | None,
+                                nachalo: str, tz_min: int) -> bool:
+    """Забронировать слот. True — слот наш, False — его занял кто-то другой.
+
+    INSERT OR IGNORE + чтение владельца: побеждает тот, чья вставка прошла,
+    а не тот, кто раньше прочитал. Повторная бронь того же слота тем же
+    человеком тоже вернёт True — это не ошибка, а идемпотентность.
+    """
+    await _exec(
+        "INSERT OR IGNORE INTO vstrechi (tg_id, username, nachalo, tz_min, status) "
+        "VALUES (?, ?, ?, ?, 'booked')", (tg_id, username, nachalo, int(tz_min)))
+    row = await _exec(
+        "SELECT tg_id FROM vstrechi WHERE nachalo = ? AND status = 'booked'",
+        (nachalo,), fetch="one")
+    return bool(row) and int(row["tg_id"]) == int(tg_id)
+
+
+async def vstrecha_vladelec(nachalo: str) -> int | None:
+    """Кто держит слот. Нужен, чтобы отличить «занято другим» от «занято тобой»."""
+    try:
+        row = await _exec(
+            "SELECT tg_id FROM vstrechi WHERE nachalo = ? AND status = 'booked'",
+            (nachalo,), fetch="one")
+        return int(row["tg_id"]) if row else None
+    except Exception:
+        logger.warning("vstrecha_vladelec failed (continuing)", exc_info=True)
+        return None
+
+
+async def vstrecha_moya(tg_id: int):
+    """Действующая бронь человека → row | None. Крэш-сейф."""
+    try:
+        return await _exec(
+            "SELECT * FROM vstrechi WHERE tg_id = ? AND status = 'booked' "
+            "ORDER BY nachalo LIMIT 1", (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("vstrecha_moya failed (continuing)", exc_info=True)
+        return None
+
+
+async def vstrecha_otmenit(tg_id: int):
+    """Снять бронь человека. Возвращает снятую строку (с nachalo и tz_min) или None.
+
+    Возвращается именно строка, а не одно начало: уведомление об отмене обязано
+    назвать время на часах человека, а его пояс лежит здесь же. Отдай мы только
+    начало — вторая сторона прочитала бы московское время как «его».
+
+    Не удаляем строку: отменённая бронь — факт, по которому видно, что человек
+    записывался и ушёл. Слот освобождается тем, что индекс частичный.
+    """
+    row = await vstrecha_moya(tg_id)
+    if not row:
+        return None
+    try:
+        await _exec("UPDATE vstrechi SET status = 'otmenena' WHERE id = ?", (row["id"],))
+        return row
+    except Exception:
+        logger.warning("vstrecha_otmenit failed (continuing)", exc_info=True)
+        return None
+
+
+async def vstrecha_napomnit_due(ot: str, do: str):
+    """Брони, которым пора напомнить: начало в окне [ot, do], напоминания не было."""
+    try:
+        return await _exec(
+            "SELECT * FROM vstrechi WHERE status = 'booked' AND napomnil_at IS NULL "
+            "AND nachalo > ? AND nachalo <= ? ORDER BY nachalo LIMIT 50",
+            (ot, do), fetch="all") or []
+    except Exception:
+        logger.warning("vstrecha_napomnit_due failed (continuing)", exc_info=True)
+        return []
+
+
+async def vstrecha_napomnil(vstrecha_id: int) -> None:
+    """Отметка напоминания. Ставится ДО отправки — пропуск дешевле дубля."""
+    try:
+        await _exec("UPDATE vstrechi SET napomnil_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (vstrecha_id,))
+    except Exception:
+        logger.warning("vstrecha_napomnil failed (continuing)", exc_info=True)

@@ -23,10 +23,9 @@ from aiogram.types import Update, Message
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import settings
+from config import settings, ADMIN_IDS
 from database import init_db, reconcile_oneonone_due
 from handlers import router
-from calendly import reconcile_tick as calendly_reconcile_tick
 from quiz_para import para_router
 from webhooks import setup_webhooks
 
@@ -83,7 +82,8 @@ class DMInspectMiddleware(BaseMiddleware):
 
 
 
-_ADMIN_IDS = {6271776494, 680319075}  # Кай, Алёна
+# Кай и Алёна — определение переехало в config.ADMIN_IDS: тот же список
+# нужен записи на встречу, а копия списка расходится молча.
 
 
 async def _admin_chat_id(message: Message):
@@ -123,7 +123,7 @@ async def main():
     )
     dp = Dispatcher()
     # Служебный админ-хэндлер (chat_id из форварда) — на dp, раньше всех роутеров.
-    dp.message.register(_admin_chat_id, F.forward_origin, F.from_user.id.in_(_ADMIN_IDS))
+    dp.message.register(_admin_chat_id, F.forward_origin, F.from_user.id.in_(ADMIN_IDS))
     dp.update.outer_middleware(DMInspectMiddleware())
     # СНЯТО 29.08: curator_router — контент-конвейер, чей единственный батч
     # (curator_data.py) собран под мёртвую воронку: тест Тени и колода
@@ -156,6 +156,10 @@ async def main():
     # кто прошёл тесты раньше и до конца второго теста больше не дойдёт.
     from dnevnik import dnevnik_router
     dp.include_router(dnevnik_router)
+    # Своя запись на встречу (29.08, вместо Calendly): /vstrecha, /okna и шаги
+    # выбора времени. Только callback'и vst:* и две команды — конфликтов нет.
+    from vstrecha import vstrecha_router
+    dp.include_router(vstrecha_router)
     dp.include_router(router)
 
     scheduler = AsyncIOScheduler()
@@ -184,10 +188,14 @@ async def main():
     # потерялся, cron добьёт sessions_left до тарифа активным подписчикам, чей
     # период старше ~30 дней — оплативший не заперт со 2-го месяца.
     scheduler.add_job(_oneonone_reconcile_tick, "interval", hours=24)
-    # Calendly polling: списание на реальную бронь / возврат при отмене-незаписи.
-    # No-op без CALENDLY_API_TOKEN (флоу деградирует к ручному возврату Алёной).
-    scheduler.add_job(calendly_reconcile_tick, "interval",
-                      minutes=settings.calendly_poll_min, args=[bot])
+    # СНЯТО 29.08 (мандат Кая «сделаем свой календарь, а не календли»): тик
+    # сверки с Calendly. Будущих записей там не было (проверено API 29.08:
+    # scheduled_events за 90 дней назад и вперёд — ноль), сервис навязывал
+    # чужую длительность и не давал удалить свой мусор через API.
+    # Напоминание о встрече за час. Раз в десять минут: реже — и напоминание
+    # опаздывает на разницу, как сторож с шагом опроса больше порога.
+    from vstrecha import run_vstrecha_tick
+    scheduler.add_job(run_vstrecha_tick, "interval", minutes=10, args=[bot])
     scheduler.start()
 
     # Webhook server (Tribute; эндпоинт Tally снят вместе со старым квизом)
