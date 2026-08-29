@@ -490,7 +490,8 @@ _RUNTIME_MIGRATIONS = (
     # ── Пивот E1 (T1): тест «Атмосфера дома» — 12 вопросов, 4 опоры.
     # PRIMARY KEY tg_id: повторное прохождение перезаписывает (retake разрешён).
     # pair_src = tg_id инициатора пары (deeplink pair_<uid>) — связь пары.
-    # nextday_sent — флаг next-day чека (~20 ч), см. quiz_atmosfera.run_atm_nextday_tick.
+    # Таблица осталась под pair_src (пара для банка): её читает resolve_couple.
+    # Сам тест «Атмосфера дома» снят 29.08 (§12), nextday_sent больше никем не читается.
     """CREATE TABLE IF NOT EXISTS atm_quiz (
         tg_id INTEGER PRIMARY KEY,
         answers TEXT,
@@ -519,9 +520,8 @@ _RUNTIME_MIGRATIONS = (
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(couple_id, kind, day_key)
     )""",
-    # ── «6 секунд» (Шаг 2, on-ramp): лёгкий стейт 3 вечеров по образцу
-    # atm_nextday. day = последний отправленный вечер (0..3), last_sent_at —
-    # время отправки (метка ДО отправки = антидубль); тик advance-ит по времени.
+    # ── «6 секунд» снят 29.08 (§12): кода нет, таблица оставлена как есть —
+    # данные живых людей не дропаем, схему не мигрируем.
     """CREATE TABLE IF NOT EXISTS sixsec (
         tg_id INTEGER PRIMARY KEY,
         weak TEXT,
@@ -1826,38 +1826,6 @@ async def atm_save_result(tg_id: int, answers_json: str, scores_json: str,
         (tg_id, answers_json, scores_json, weak, pair_src))
 
 
-async def atm_get_result(tg_id: int):
-    """Результат теста юзера → dict | None. Крэш-сейф (нет таблицы → None)."""
-    try:
-        return await _exec("SELECT * FROM atm_quiz WHERE tg_id = ?",
-                           (tg_id,), fetch="one")
-    except Exception:
-        logger.warning("atm_get_result failed (continuing)", exc_info=True)
-        return None
-
-
-async def atm_nextday_due(hours: int = 20, limit: int = 50):
-    """Кому пора слать next-day чек: прошли тест ≥N часов назад, ещё не слали.
-    Крэш-сейф → []."""
-    try:
-        return await _exec(
-            "SELECT tg_id FROM atm_quiz WHERE nextday_sent = 0 "
-            f"AND datetime(created_at, '+{int(hours)} hours') < datetime('now') "
-            f"LIMIT {int(limit)}", fetch="all") or []
-    except Exception:
-        logger.warning("atm_nextday_due failed (continuing)", exc_info=True)
-        return []
-
-
-async def atm_mark_nextday(tg_id: int):
-    """Метка «next-day чек отправлен» — ДО отправки (антидубль). Крэш-сейф."""
-    try:
-        await _exec("UPDATE atm_quiz SET nextday_sent = 1 WHERE tg_id = ?",
-                    (tg_id,))
-    except Exception:
-        logger.warning("atm_mark_nextday failed (continuing)", exc_info=True)
-
-
 # ── Лидмагнит «Какой тип отношений в вашей паре?» (13.08) ────────────────────
 
 async def para_save_result(tg_id: int, scores_json: str, dynamic: str | None,
@@ -2050,149 +2018,6 @@ async def render_bank_card(couple_id: int) -> str:
 # Оба партнёра независимо отмечают «поворот друг к другу?». Банк 5:1 растёт ТОЛЬКО
 # когда ОБА подтвердили (both_yes) — канон «мне ОТВЕТИЛИ», подтверждение партнёра,
 # а не само-отчёт. Идемпотентность per (couple, day, tg_id): первый ответ дня фиксирован.
-
-async def couple_partner(couple_id: int, tg_id: int) -> int | None:
-    """Второй участник пары для tg_id, или None если соло (partner_id NULL).
-    Пара = couple_id (инициатор) + partner_id. Крэш-сейф → None."""
-    try:
-        row = await _exec("SELECT partner_id FROM couples WHERE couple_id = ?",
-                          (couple_id,), fetch="one")
-        pid = (row or {}).get("partner_id")
-    except Exception:
-        logger.warning("couple_partner failed (continuing)", exc_info=True)
-        return None
-    if not pid:
-        return None
-    return couple_id if tg_id != couple_id else int(pid)
-
-
-async def checkin_set(couple_id: int, tg_id: int, yes: bool,
-                      day_key: str | None = None) -> None:
-    """Записать ответ партнёра на дневной чек-ин. Идемпотентно per (couple,day,tg_id):
-    INSERT OR IGNORE — первый ответ дня фиксирован, повторный тап не перезаписывает.
-    Крэш-сейф."""
-    dk = _bank_day_key(day_key)
-    try:
-        await _exec(
-            "INSERT OR IGNORE INTO checkin_ledger (couple_id, day_key, tg_id, answer) "
-            "VALUES (?, ?, ?, ?)",
-            (couple_id, dk, tg_id, 1 if yes else 0))
-    except Exception:
-        logger.warning("checkin_set failed (continuing)", exc_info=True)
-
-
-async def checkin_pause_set(tg_id: int, days: int = 7) -> None:
-    """Поставить ежедневный чек-ин на паузу для одного человека.
-    Явный выход обязателен: ежедневная рассылка без кнопки «не спрашивать»
-    собирает жалобы на спам, а это прямой риск блокировки бота."""
-    until = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
-    try:
-        await _exec(
-            "INSERT INTO checkin_pause (tg_id, until) VALUES (?, ?) "
-            "ON CONFLICT(tg_id) DO UPDATE SET until = excluded.until",
-            (tg_id, until))
-    except Exception:
-        logger.warning("checkin_pause_set failed (continuing)", exc_info=True)
-
-
-async def checkin_paused(tg_id: int) -> bool:
-    """Стоит ли пауза прямо сейчас. Крэш-сейф → False (лучше спросить, чем молчать)."""
-    try:
-        row = await _exec("SELECT until FROM checkin_pause WHERE tg_id = ?",
-                          (tg_id,), fetch="one")
-        if not row or not row.get("until"):
-            return False
-        return str(row["until"]) > _bank_day_key(None)
-    except Exception:
-        logger.warning("checkin_paused failed (continuing)", exc_info=True)
-        return False
-
-
-async def couples_full() -> list[dict]:
-    """Пары, где есть ОБА участника — только им шлём дневной чек-ин.
-    Одиночке вопрос про «поворот друг к другу» каждый вечер — напоминание об
-    одиночестве, а не ритуал (решение Кая 26.07)."""
-    try:
-        rows = await _exec(
-            "SELECT couple_id, partner_id FROM couples WHERE partner_id IS NOT NULL",
-            fetch="all")
-        return [dict(r) for r in (rows or [])]
-    except Exception:
-        logger.warning("couples_full failed (continuing)", exc_info=True)
-        return []
-
-
-async def checkin_day(couple_id: int, day_key: str | None = None) -> dict:
-    """Состояние дневного чек-ина → {answers:{tg_id:bool}, n, both_answered, both_yes}.
-    both_answered = ответили 2 разных tg_id. both_yes = оба «Да» (партнёрское
-    подтверждение поворота → парный gate банка). Крэш-сейф → пусто."""
-    dk = _bank_day_key(day_key)
-    answers: dict[int, bool] = {}
-    try:
-        rows = await _exec(
-            "SELECT tg_id, answer FROM checkin_ledger WHERE couple_id = ? AND day_key = ?",
-            (couple_id, dk), fetch="all")
-        for r in rows or []:
-            answers[int((r or {}).get("tg_id"))] = bool((r or {}).get("answer"))
-    except Exception:
-        logger.warning("checkin_day failed (continuing)", exc_info=True)
-    both_answered = len(answers) >= 2
-    return {
-        "answers": answers,
-        "n": len(answers),
-        "both_answered": both_answered,
-        "both_yes": both_answered and all(answers.values()),
-    }
-
-
-# ── «6 секунд»: 3 вечера микро-действий под слабую опору (Шаг 2, on-ramp) ─────
-# Свой лёгкий стейт по образцу atm_nextday: day = последний отправленный вечер
-# (0..3), last_sent_at — время отправки (метка ДО отправки, антидубль). Тик
-# advance-ит вечер по времени (~20 ч), как run_atm_nextday_tick. Всё крэш-сейф.
-
-async def sixsec_begin(tg_id: int, weak: str):
-    """Старт «6 секунд»: вечер 1 шлётся сразу (day=1, метка now). upsert (retake ок)."""
-    try:
-        await _exec(
-            "INSERT INTO sixsec (tg_id, weak, day, last_sent_at) "
-            "VALUES (?, ?, 1, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(tg_id) DO UPDATE SET weak = excluded.weak, day = 1, "
-            "last_sent_at = CURRENT_TIMESTAMP",
-            (tg_id, weak))
-    except Exception:
-        logger.warning("sixsec_begin failed (continuing)", exc_info=True)
-
-
-async def sixsec_get(tg_id: int):
-    """Строка стейта «6 секунд» → dict | None. Крэш-сейф."""
-    try:
-        return await _exec("SELECT * FROM sixsec WHERE tg_id = ?", (tg_id,), fetch="one")
-    except Exception:
-        logger.warning("sixsec_get failed (continuing)", exc_info=True)
-        return None
-
-
-async def sixsec_due(hours: int = 20, limit: int = 50):
-    """Кому пора следующий вечер: day 1..2, прошло ≥N часов с прошлого. Крэш-сейф → []."""
-    try:
-        return await _exec(
-            "SELECT tg_id, weak, day FROM sixsec WHERE day BETWEEN 1 AND 2 "
-            f"AND datetime(last_sent_at, '+{int(hours)} hours') < datetime('now') "
-            f"LIMIT {int(limit)}", fetch="all") or []
-    except Exception:
-        logger.warning("sixsec_due failed (continuing)", exc_info=True)
-        return []
-
-
-async def sixsec_advance(tg_id: int, day: int):
-    """Отметить отправку вечера `day` (ДО отправки — антидубль). Крэш-сейф."""
-    try:
-        await _exec(
-            "UPDATE sixsec SET day = ?, last_sent_at = CURRENT_TIMESTAMP WHERE tg_id = ?",
-            (int(day), tg_id))
-    except Exception:
-        logger.warning("sixsec_advance failed (continuing)", exc_info=True)
-
 
 # ── Воронка «Сценарий отношений»: цепочка 7 дней и заявки на разбор ──────────
 

@@ -8,7 +8,7 @@ import logging
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo,
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
 )
 
 from config import settings
@@ -156,19 +156,8 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 # Mini App: тест, практика и дневник отношений живут там.
 APP_URL = "https://kydaidy.com/app/"
 
-OPEN_APP_TEXT = ("Тест «Атмосфера дома» — 12 вопросов, две минуты.\n"
-                 "Покажет, на какой опоре держится ваш дом, а какая просела.")
-
-INVITED_PARTNER_TEXT = ("Вас позвали пройти тест вдвоём.\n\n"
-                        "Двенадцать вопросов, две минуты. Потом увидите общую карту: "
-                        "где вы смотрите одинаково, а где по-разному.")
-
-
-def _app_keyboard(url: str, label: str) -> InlineKeyboardMarkup:
-    """Кнопка открытия Mini App внутри Telegram (без выхода в браузер)."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, web_app=WebAppInfo(url=url))],
-    ])
+# СНЯТО 29.08 (§12 «Старое приложение: тест атмосферы…»): OPEN_APP_TEXT,
+# INVITED_PARTNER_TEXT и _app_keyboard вели в экран #/test мёртвого приложения.
 
 
 def _onramp_keyboard() -> InlineKeyboardMarkup:
@@ -220,24 +209,10 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await message.answer(WELCOME_NO_POVOROT, reply_markup=_onramp_keyboard())
         return
 
-    # Пивот E1 (T1): тест «Атмосфера дома». ВАЖНО: обе ветки ДО _split_source —
-    # бэр-токены «test»/«pair_<uid>» атрибуция съела бы как метку источника.
-    # pair_<uid> — парный флоу (uid = tg_id инициатора); допускаем суффикс «__tag».
-    if args.startswith("pair_"):
-        core, source = _split_source(args) if "__" in args else (args, None)
-        uid = core[len("pair_"):]
-        if uid.lstrip("-").isdigit():
-            await upsert_user(user.id, user.username, user.first_name)
-            await set_user_source(user.id, source)
-            # Тест переехал в Mini App (решение Кая 26.07): ведём партнёра ТУДА же,
-            # куда пошёл первый. Иначе половина пары проходит тест в чате, половина
-            # в приложении — карта пары собирается из двух разных путей.
-            # pair=<uid> приложение передаст в quiz_save, там и свяжется пара.
-            await message.answer(
-                INVITED_PARTNER_TEXT,
-                reply_markup=_app_keyboard(f"{APP_URL}?pair={int(uid)}#/test",
-                                           "Пройти тест"))
-            return
+    # СНЯТО 29.08 (§12): ветка ?start=pair_<uid> вела приглашённого партнёра в
+    # экран #/test старого приложения — тест «Атмосфера дома». Ссылка живёт у
+    # людей на руках, поэтому не падаем: метка источника считывается ниже, а сам
+    # человек попадает на общий вход новой воронки.
     # Лидмагнит «Какой тип отношений в вашей паре?» (13.08): ?start=para
     # (+ суффикс источника para__pin). ВАЖНО: ДО _split_source — бэр-токен
     # «para» атрибуция съела бы как метку источника.
@@ -259,8 +234,8 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await show_intro(message, user.id, source or "razbor")
         return
 
-    # Старые функциональные ссылки мёртвой воронки (?start=test, ?start=povorot3,
-    # ?start=s_<код> и ?start=shadow_<код>) сняты 29.08: они вели в тест
+    # Старые функциональные ссылки мёртвой воронки (?start=test, ?start=pair_<uid>,
+    # ?start=povorot3, ?start=s_<код> и ?start=shadow_<код>) сняты 29.08: они вели в тест
     # «Атмосфера дома», в карту перепутья и в тест Тени. Метка источника с них
     # по-прежнему считывается ниже, а сам человек попадает на общий вход.
     args, source = _split_source(args)

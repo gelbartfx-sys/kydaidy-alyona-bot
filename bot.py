@@ -27,10 +27,7 @@ from config import settings
 from database import init_db, reconcile_oneonone_due
 from handlers import router
 from calendly import reconcile_tick as calendly_reconcile_tick
-from quiz_atmosfera import atm_router, run_atm_nextday_tick
 from quiz_para import para_router
-from sixsec import sixsec_router, run_sixsec_tick
-from checkin import checkin_router, run_checkin_tick
 from webhooks import setup_webhooks
 
 logging.basicConfig(
@@ -142,9 +139,11 @@ async def main():
     #   growth_router (growth_agent)    — реактивация обратно в Клуб.
     # Код оставлен в репозитории (решение о его судьбе — за Каем), но ни одна
     # его строка больше не достижима из чата.
-    # atm_router (тест «Атмосфера дома», E1/T1): /dom + callback'и atmq:* —
-    # раньше главного router, чтобы /dom не съел catch-all fallback.
-    dp.include_router(atm_router)
+    # СНЯТО 29.08 (мандат Кая 28.08, VORONKA-2026-08-28.md §12 «Старое приложение:
+    # тест атмосферы, вечера, чек-ин, банк 5:1, витрины клуба»): слой старого
+    # приложения снят целиком — роутеры atm_router (/dom, atmq:*), sixsec_router
+    # (six:*) и checkin_router (/checkin, chk:*) больше не подключаются, модули
+    # quiz_atmosfera(.data), sixsec(.data), checkin, week_data удалены из репозитория.
     # para_router (лидмагнит «Какой тип отношений в вашей паре?», 13.08):
     # только callback'и paq:*/par2:* — текст-фильтров нет, конфликтов нет.
     dp.include_router(para_router)
@@ -157,14 +156,6 @@ async def main():
     # кто прошёл тесты раньше и до конца второго теста больше не дойдёт.
     from dnevnik import dnevnik_router
     dp.include_router(dnevnik_router)
-    # sixsec_router («6 секунд», on-ramp): callback'и six:* — раньше главного
-    # router, чтобы не съел catch-all fallback. Инвайт в конце реюзит atmq:invite
-    # (в atm_router выше). Только callback'и, текст-фильтров нет — конфликтов нет.
-    dp.include_router(sixsec_router)
-    # checkin_router: /checkin + callback chk:* — только callback'и + команда,
-    # текст-фильтров нет (конфликтов с главным router нет). Узел кольца: парный
-    # gate банка (подтверждение партнёра), чинит рост банка на само-отчёт в sixsec.
-    dp.include_router(checkin_router)
     dp.include_router(router)
 
     scheduler = AsyncIOScheduler()
@@ -184,16 +175,11 @@ async def main():
     # run_stale_session_tick / run_reengage_tick / run_orphan_turn_tick /
     # run_dead_session_tick / run_club_ladder_tick (обслуживали AI-встречу,
     # закрывавшую на Клуб 990 ₽). Дожим run_followup_tick снят ещё 28.08.
-    # Тест «Атмосфера дома»: next-day чек ~20 ч после прохождения (E1/T1).
-    scheduler.add_job(run_atm_nextday_tick, "interval", minutes=30, args=[bot])
-    # «6 секунд» (Шаг 2, on-ramp): вечера 2–3 через ~20 ч после предыдущего.
-    scheduler.add_job(run_sixsec_tick, "interval", minutes=30, args=[bot])
-    # Дневной чек-ин: 21:00 по Москве. Сутки в банке тоже считаются по Москве
-    # (database._bank_day_key) — иначе ответ после полуночи уезжал бы в другой день
-    # и парный gate не срабатывал. Шлём только парам, где есть оба; поставившие
-    # паузу и уже ответившие пропускаются, поэтому повторный запуск не задваивает.
-    scheduler.add_job(run_checkin_tick, "cron", hour=21, minute=0,
-                      timezone="Europe/Moscow", args=[bot])
+    # СНЯТО 29.08 (мандат Кая 28.08, §12): тики старого приложения больше не
+    # заводятся — каждый сам, по таймеру, писал живым людям из мёртвого слоя.
+    # Сняты: run_atm_nextday_tick (next-day чек теста «Атмосфера дома»),
+    # run_sixsec_tick (вечера «6 секунд»), run_checkin_tick (дневной чек-ин 21:00
+    # с банком 5:1).
     # Подписочный 1:1: страховка сброса счётчика встреч. Если вебхук продления
     # потерялся, cron добьёт sessions_left до тарифа активным подписчикам, чей
     # период старше ~30 дней — оплативший не заперт со 2-го месяца.
