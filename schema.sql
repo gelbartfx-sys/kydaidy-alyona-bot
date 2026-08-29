@@ -87,3 +87,30 @@ CREATE TABLE IF NOT EXISTS para_quiz (
     strategy TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ДНЕВНИК ОТНОШЕНИЙ (29.08.2026). Неделя отметок «плюс/минус» с шагом 1/2/4 часа.
+-- Сессия одна на человека: перезапуск недели переписывает строку, история отметок
+-- остаётся. couple_id роднит две сессии пары — партнёру видны только знаки.
+CREATE TABLE IF NOT EXISTS dnevnik (
+    tg_id INTEGER PRIMARY KEY,
+    couple_id INTEGER,
+    rezhim TEXT DEFAULT 'solo',        -- solo | para
+    shag INTEGER DEFAULT 2,            -- 1 | 2 | 4 часа между отметками
+    start_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    konec_ts TIMESTAMP,                -- когда неделя закрывается
+    last_pin_slot TEXT,                -- слот последнего пинка: антидубль
+    itog_sent INTEGER DEFAULT 0,       -- срез и заявка отправлены
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Отметка. slot — ключ окна по Москве (YYYY-MM-DD-HH), уникален на человека:
+-- двойное нажатие и ретрай запроса не задваивают запись.
+CREATE TABLE IF NOT EXISTS dnevnik_otmetki (
+    tg_id INTEGER,
+    slot TEXT,
+    couple_id INTEGER,
+    znak INTEGER,                      -- +1 | -1
+    tekst TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tg_id, slot)
+);

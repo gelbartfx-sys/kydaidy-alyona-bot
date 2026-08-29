@@ -419,6 +419,10 @@ async def _finish_t2(msg: Message, tg_id: int, st: dict):
     except Exception:
         logger.debug("log_event para_bridge_shown failed", exc_info=True)
 
+    # Дневник отношений — следующий шаг после двух тестов (мандат Кая 29.08).
+    from dnevnik import predlozhit
+    await predlozhit(msg, tg_id)
+
 
 if __name__ == "__main__":
     # Само-проверка счёта: прототипы шести динамик + пример из каркаса GPT.

@@ -176,7 +176,12 @@ async def main():
     # Цепочка 7 дней воронки «Сценарий отношений» (28.08). Старая
     # nurture-серия по «5 поворотам» снята: воронка «Манифест» закрыта.
     from drip_para import run_drip_tick
+    from dnevnik import run_dnevnik_tick, run_dnevnik_itog_tick
     scheduler.add_job(run_drip_tick, "interval", hours=1, args=[bot])
+    # Дневник отношений: пинок по слоту и срез седьмого дня. Оба тика
+    # идемпотентны по отметке ДО отправки — час опоздания дешевле дубля.
+    scheduler.add_job(run_dnevnik_tick, "interval", hours=1, args=[bot])
+    scheduler.add_job(run_dnevnik_itog_tick, "interval", hours=1, args=[bot])
     # Контент-конвейер: утренняя рассылка батча куратору + дрип-автопостинг в канал.
     scheduler.add_job(
         push_daily_batch, "cron",

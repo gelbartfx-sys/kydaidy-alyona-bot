@@ -214,6 +214,29 @@ CREATE TABLE IF NOT EXISTS checkin_ledger (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(couple_id, day_key, tg_id)
 );
+
+-- Дневник отношений (29.08.2026): неделя отметок «плюс/минус» с шагом 1/2/4 часа.
+CREATE TABLE IF NOT EXISTS dnevnik (
+    tg_id INTEGER PRIMARY KEY,
+    couple_id INTEGER,
+    rezhim TEXT DEFAULT 'solo',
+    shag INTEGER DEFAULT 2,
+    start_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    konec_ts TIMESTAMP,
+    last_pin_slot TEXT,
+    itog_sent INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dnevnik_otmetki (
+    tg_id INTEGER,
+    slot TEXT,
+    couple_id INTEGER,
+    znak INTEGER,
+    tekst TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tg_id, slot)
+);
 """
 
 
@@ -516,6 +539,28 @@ _RUNTIME_MIGRATIONS = (
         dynamic2 TEXT,
         strategy TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    # ── Дневник отношений (29.08.2026). Сессия одна на человека, отметка
+    # уникальна на слот: двойное нажатие и ретрай запроса не задваивают запись.
+    """CREATE TABLE IF NOT EXISTS dnevnik (
+        tg_id INTEGER PRIMARY KEY,
+        couple_id INTEGER,
+        rezhim TEXT DEFAULT 'solo',
+        shag INTEGER DEFAULT 2,
+        start_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        konec_ts TIMESTAMP,
+        last_pin_slot TEXT,
+        itog_sent INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS dnevnik_otmetki (
+        tg_id INTEGER,
+        slot TEXT,
+        couple_id INTEGER,
+        znak INTEGER,
+        tekst TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(tg_id, slot)
     )""",
 )
 
@@ -2219,3 +2264,152 @@ async def razbor_count() -> int:
     except Exception:
         logger.warning("razbor_count failed (continuing)", exc_info=True)
         return 0
+
+
+# ── ДНЕВНИК ОТНОШЕНИЙ (29.08.2026) ──────────────────────────────────────────
+#
+# Неделя отметок «плюс/минус» с шагом 1/2/4 часа. Окно 09:00–22:00 по Москве:
+# ночью не пинаем вовсе, пропущенный слот не догоняется — дубль в личке дороже
+# пропущенной отметки (тот же принцип, что в drip_para).
+
+DNEVNIK_SHAGI = (1, 2, 4)
+DNEVNIK_OKNO = (9, 22)          # [начало, конец): последний слот начинается в 21
+DNEVNIK_DNEY = 7
+
+
+def dnevnik_slot(shag: int, moment: datetime | None = None) -> str | None:
+    """Ключ окна отметки: 'YYYY-MM-DD-HH' по МОСКВЕ, где HH — начало окна.
+
+    Окна отсчитываются от 09:00, поэтому при шаге 2 это 9, 11, 13… 21, а не
+    привязка к чётному часу суток: иначе у людей с разным шагом окна разъезжались
+    бы и «последний час» значил бы разное.
+
+    Вне окна 09:00–22:00 возвращает None — это не ошибка, а тишина.
+
+    ЭТО ЖЕ ПРАВИЛО продублировано в functions/api/app.js (dnevnikSlot) — значения
+    ОБЯЗАНЫ совпадать, иначе отметка из приложения и пинок из бота попадут в
+    разные слоты и человек получит второй пинок сразу после ответа.
+    """
+    m = (moment or datetime.utcnow()) + timedelta(hours=3)
+    nachalo, konec = DNEVNIK_OKNO
+    if not (nachalo <= m.hour < konec):
+        return None
+    shag = int(shag) if int(shag) in DNEVNIK_SHAGI else 2
+    chas = nachalo + ((m.hour - nachalo) // shag) * shag
+    return f"{m:%Y-%m-%d}-{chas:02d}"
+
+
+async def dnevnik_start(tg_id: int, couple_id: int, rezhim: str, shag: int):
+    """Открыть неделю. Повторный запуск переписывает сессию, отметки остаются."""
+    shag = int(shag) if int(shag) in DNEVNIK_SHAGI else 2
+    rezhim = "para" if rezhim == "para" else "solo"
+    konec = (datetime.utcnow() + timedelta(days=DNEVNIK_DNEY))
+    await _exec(
+        "INSERT INTO dnevnik (tg_id, couple_id, rezhim, shag, start_ts, konec_ts, "
+        "last_pin_slot, itog_sent) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, NULL, 0) "
+        "ON CONFLICT(tg_id) DO UPDATE SET couple_id = excluded.couple_id, "
+        "rezhim = excluded.rezhim, shag = excluded.shag, start_ts = CURRENT_TIMESTAMP, "
+        "konec_ts = excluded.konec_ts, last_pin_slot = NULL, itog_sent = 0",
+        (tg_id, couple_id, rezhim, shag, _d1_param(konec)))
+
+
+async def dnevnik_get(tg_id: int):
+    try:
+        return await _exec("SELECT * FROM dnevnik WHERE tg_id = ?", (tg_id,), fetch="one")
+    except Exception:
+        logger.warning("dnevnik_get failed (continuing)", exc_info=True)
+        return None
+
+
+async def dnevnik_otmetit(tg_id: int, couple_id: int, slot: str, znak: int, tekst: str) -> bool:
+    """Поставить отметку. Возвращает False, если слот уже занят.
+
+    Текст обязателен (решение Кая 29.08): пустая строка отклоняется здесь, а не
+    только в форме — запрос можно послать мимо интерфейса.
+    """
+    tekst = (tekst or "").strip()
+    if not tekst:
+        return False
+    znak = 1 if int(znak) > 0 else -1
+    try:
+        est = await _exec(
+            "SELECT 1 FROM dnevnik_otmetki WHERE tg_id = ? AND slot = ?",
+            (tg_id, slot), fetch="one")
+        if est:
+            return False
+        await _exec(
+            "INSERT OR IGNORE INTO dnevnik_otmetki (tg_id, slot, couple_id, znak, tekst) "
+            "VALUES (?, ?, ?, ?, ?)", (tg_id, slot, couple_id, znak, tekst[:1000]))
+        return True
+    except Exception:
+        logger.warning("dnevnik_otmetit failed (continuing)", exc_info=True)
+        return False
+
+
+async def dnevnik_moi(tg_id: int, limit: int = 200):
+    """Свои отметки — со знаком И текстом."""
+    try:
+        return await _exec(
+            "SELECT slot, znak, tekst, created_at FROM dnevnik_otmetki "
+            f"WHERE tg_id = ? ORDER BY slot LIMIT {int(limit)}", (tg_id,), fetch="all") or []
+    except Exception:
+        logger.warning("dnevnik_moi failed (continuing)", exc_info=True)
+        return []
+
+
+async def dnevnik_partnera(couple_id: int, tg_id: int, limit: int = 200):
+    """Отметки партнёра — ТОЛЬКО знак и время.
+
+    Текст «почему» партнёру не отдаётся никогда (решение Кая 29.08): иначе люди
+    начнут писать для партнёра, а не правду, и на разборе разбирать будет нечего.
+    Столбец tekst здесь не выбирается вовсе — не «скрывается на клиенте».
+    """
+    if not couple_id:
+        return []
+    try:
+        return await _exec(
+            "SELECT slot, znak FROM dnevnik_otmetki "
+            f"WHERE couple_id = ? AND tg_id != ? ORDER BY slot LIMIT {int(limit)}",
+            (couple_id, tg_id), fetch="all") or []
+    except Exception:
+        logger.warning("dnevnik_partnera failed (continuing)", exc_info=True)
+        return []
+
+
+async def dnevnik_aktivnye(limit: int = 200):
+    """Живые сессии — для тика пинков."""
+    try:
+        return await _exec(
+            "SELECT tg_id, couple_id, shag, konec_ts, last_pin_slot FROM dnevnik "
+            "WHERE COALESCE(itog_sent, 0) = 0 AND datetime(konec_ts) > datetime('now') "
+            f"LIMIT {int(limit)}", fetch="all") or []
+    except Exception:
+        logger.warning("dnevnik_aktivnye failed (continuing)", exc_info=True)
+        return []
+
+
+async def dnevnik_pin_otmetit(tg_id: int, slot: str):
+    """Отметить слот пинка ДО отправки — антидубль при падении отправки."""
+    try:
+        await _exec("UPDATE dnevnik SET last_pin_slot = ? WHERE tg_id = ?", (slot, tg_id))
+    except Exception:
+        logger.warning("dnevnik_pin_otmetit failed (continuing)", exc_info=True)
+
+
+async def dnevnik_zaversheny(limit: int = 50):
+    """Недели, у которых вышел срок, а срез ещё не отправлен."""
+    try:
+        return await _exec(
+            "SELECT tg_id, couple_id, rezhim, shag FROM dnevnik "
+            "WHERE COALESCE(itog_sent, 0) = 0 AND datetime(konec_ts) <= datetime('now') "
+            f"LIMIT {int(limit)}", fetch="all") or []
+    except Exception:
+        logger.warning("dnevnik_zaversheny failed (continuing)", exc_info=True)
+        return []
+
+
+async def dnevnik_itog_otmetit(tg_id: int):
+    try:
+        await _exec("UPDATE dnevnik SET itog_sent = 1 WHERE tg_id = ?", (tg_id,))
+    except Exception:
+        logger.warning("dnevnik_itog_otmetit failed (continuing)", exc_info=True)
