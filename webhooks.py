@@ -16,9 +16,8 @@ from aiogram import Bot
 from urllib.parse import quote
 
 from config import settings
-from database import (upsert_user, add_purchase, add_subscription, get_user,
+from database import (add_purchase, add_subscription, get_user,
                       set_oneonone, get_oneonone, deactivate_subscription, log_event)
-from handlers import _send_povorot_result
 
 logger = logging.getLogger(__name__)
 
@@ -62,53 +61,12 @@ def _verify_tally_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-async def tally_webhook(request: web.Request) -> web.Response:
-    """Webhook от Tally после прохождения квиза.
-
-    В Tally → Settings → Integrations → Webhook → URL.
-    Tally отправляет JSON с ответами + UTM-параметром, который мы извлекаем как 'povorot'.
-    """
-    try:
-        body = await request.read()
-
-        signature = request.headers.get("tally-signature", "")
-        if not _verify_tally_signature(body, signature):
-            logger.warning(f"Tally webhook: bad signature, body={body[:200]!r}")
-            return web.Response(status=403, text="invalid signature")
-
-        data = json.loads(body)
-        logger.info(f"Tally webhook: {json.dumps(data)[:200]}")
-
-        # Извлекаем tg_id и povorot из hidden fields формы
-        # Tally хранит ответы в data["data"]["fields"]
-        fields = {f["label"]: f.get("value") for f in data.get("data", {}).get("fields", [])}
-
-        tg_id = fields.get("tg_id")
-        povorot = fields.get("povorot")
-
-        if not tg_id or not povorot:
-            return web.Response(status=200, text="missing fields, ignoring")
-
-        try:
-            tg_id = int(tg_id)
-            povorot = int(povorot)
-        except (TypeError, ValueError):
-            return web.Response(status=200, text="invalid fields")
-
-        if povorot not in (1, 2, 3, 4, 5):
-            return web.Response(status=200, text="invalid povorot")
-
-        await upsert_user(tg_id, None, None, povorot)
-        # send_povorot_result не вызываем напрямую — она требует Message,
-        # вместо этого юзер сам перейдёт в бот по deeplink t.me/bot?start=povorot{N}
-
-        return web.Response(status=200, text="ok")
-    except Exception as e:
-        logger.exception(f"Tally webhook error: {e}")
-        return web.Response(status=500, text="error")
+# СНЯТО 29.08 (мандат Кая 28.08): вебхук Tally обслуживал квиз «5 поворотов»
+# мёртвой воронки — писал человеку povorot в базу, после чего /start отвечал
+# «Ты на Повороте N», а deeplink выдавал «Карту перепутья». Формы больше нет,
+# эндпоинт /webhook/tally тоже снят (см. setup_webhooks ниже).
 
 
-# Реальные имена событий Tribute (camelCase) + совместимость со старыми плоскими.
 _TRIBUTE_SUB_EVENTS = {"newSubscription", "renewedSubscription", "subscription.created"}
 _TRIBUTE_CANCEL_EVENTS = {"cancelledSubscription", "subscription.cancelled"}
 _TRIBUTE_DIGITAL_EVENTS = {"newDigitalProduct", "purchase.completed"}
@@ -143,7 +101,7 @@ def _tribute_product_code(event: str, payload: dict) -> str | None:
                    or payload.get("subscription_name") or "").lower()
         if any(k in name for k in ("1:1", "1 на 1", "1on1", "сесс", "встреч", "консульт", "созвон")):
             return "manifest_1on1"
-        if any(k in name for k in ("воркбук", "манифест 7", "манифест7", "7 повор", "карта")):
+        if any(k in name for k in ("воркбук", "манифест 7", "манифест7", "7 повор", "карта")):  # voronka: ok — распознаём СТАРУЮ оплату, людям этот список не показывается
             return "manifest_7"
         # неизвестный цифровой продукт — по цене (1:1 дороже воркбука), иначе None (залогируем)
         amt = _to_int(payload.get("amount") or payload.get("price") or 0)
@@ -275,33 +233,18 @@ _CHANNEL_BY_PRODUCT = {
     "manifest_1on1": "manifest_1on1_channel_id",
 }
 
+# Оплаты по продуктам мёртвой воронки («Манифест 7», Клуб, «Манифест+», 1:1)
+# ещё могут прийти: витрины в Tribute деактивирует Кай, а продления подписок
+# идут сами. Доступ таким людям выдаём как раньше — деньги их настоящие.
+# Но маркетинг закрытой воронки (воркбук, эфиры, /praktiki, /zapis) из текста
+# убран 29.08: этих путей в боте больше нет, обещать их было бы ложью.
 _BASE_TEXTS = {
-    "manifest_7": (
-        "✅ Спасибо. Воркбук «Манифест 7» — твой.\n\n"
-        "Что внутри:\n"
-        "• Воркбук «Манифест 7» — в закрытом канале\n"
-        "• Практики с проводником — прямо в боте: /praktiki. "
-        "Веду шаг за шагом, темп задаёшь ты\n\n"
-        "Никаких обещаний быстрого результата. Карта работает, когда ты готова смотреть."
-    ),
-    "manifest_club": (
-        "✅ Добро пожаловать в Клуб «Манифест».\n\n"
-        "Здесь — эфир раз в неделю, безлимит «Алёны на связи» и чат, где я отвечаю.\n"
-        "Воркбук «Манифест 7» — в закреплённом: 80+ страниц, практики, задания и инсайты "
-        "по 5 поворотам. Осваивайся."
-    ),
-    "manifest_plus": (
-        "✅ «Манифест+» подключён.\n\n"
-        "VIP-канал + персональный отклик 1×/неделя.\n"
-        "Я свяжусь с тобой лично в течение 1–2 дней — для приветственного звонка."
-    ),
+    "manifest_7": "✅ Спасибо, оплата получена.",
+    "manifest_club": "✅ Спасибо, оплата получена.",
+    "manifest_plus": "✅ Спасибо, оплата получена.",
     "manifest_1on1": (
-        "✅ Подписка на личные встречи оформлена — я держу для тебя место в "
-        "расписании.\n\n"
-        "Как записаться: нажми /zapis прямо здесь, в этом чате. Я покажу, "
-        "сколько встреч осталось у тебя в этом месяце по тарифу, и дам ссылку "
-        "на мой календарь — выберешь удобное время. В начале следующего месяца "
-        "счётчик снова полный."
+        "✅ Спасибо, оплата получена — я держу для тебя место в расписании.\n\n"
+        "Напиши мне сюда: @kydaidy — согласуем время лично."
     ),
 }
 
@@ -383,9 +326,8 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
             logger.warning(f"channel_id not configured for {product_code} — sending text only")
             text += "\n\n_Сейчас Алёна свяжется с тобой лично._"
 
-    # 1:1 — подписочный: запись идёт через /zapis (счётчик встреч гейтит доступ
-    # к календарю), поэтому прямую ссылку тут НЕ даём — только напоминаем команду.
-    # (текст про /zapis уже в _BASE_TEXTS["manifest_1on1"].)
+    # 1:1 — подписочный. Команда /zapis снята вместе с мёртвой воронкой:
+    # время согласует Алёна лично (см. _BASE_TEXTS["manifest_1on1"]).
 
     text += "\n\n— Алёна"
 
@@ -408,27 +350,13 @@ async def _grant_access(bot: Bot, tg_id: int, product_code: str):
         await _notify_admin(bot, f"✅ Продажа: «{product_code}» · tg_id={tg_id}{note}")
 
 
-async def portrait_route(request: web.Request) -> web.Response:
-    """Отдаёт сгенерированный портрет Тени странице профиля (геро-слот)."""
-    from portrait_store import get as get_portrait
-    data = get_portrait(request.match_info.get("token", ""))
-    if not data:
-        return web.Response(status=404, text="not found")
-    return web.Response(
-        body=data,
-        content_type="image/png",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "public, max-age=3600",
-        },
-    )
+# СНЯТО 29.08: маршрут /p/{token} отдавал портрет Тени странице профиля.
+# Тест Тени и генерация портретов сняты вместе с мёртвой воронкой — отдавать нечего.
 
 
 def setup_webhooks(app: web.Application, bot: Bot):
     app["bot"] = bot
-    app.router.add_post("/webhook/tally", tally_webhook)
     app.router.add_post("/webhook/tribute", tribute_webhook)
-    app.router.add_get("/p/{token}", portrait_route)
     app.router.add_get("/", lambda r: web.Response(text="kydaidy bot is running"))
     # Маркер версии: Render кладёт sha деплоя в RENDER_GIT_COMMIT — по нему
     # продюсер сверяет, что в проде живёт именно свежая волна (аудит 06.07).

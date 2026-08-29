@@ -7,10 +7,10 @@
 Архитектура:
 - aiogram 3 для Telegram API
 - aiohttp как webhook server
-- SQLite для хранения юзеров, покупок, nurture-стейта
-- APScheduler для 7-дневной nurture-серии
+- SQLite для хранения юзеров, заявок и прогресса
+- APScheduler для цепочки 7 дней и дневника отношений
 
-Источник правды для контента: content_data.py
+Источник правды для контента: quiz_para_data.py (воронка «Сценарий отношений»).
 """
 
 import asyncio
@@ -26,15 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import settings
 from database import init_db, reconcile_oneonone_due
 from handlers import router
-from manifest7_guide import guide_router
-from alena_chat import (alena_router, run_stale_session_tick,
-                        run_orphan_turn_tick, run_club_ladder_tick,
-                        run_dead_session_tick, run_reengage_tick)
-from heygen_credits import run_credit_check
-from booking import book_router
 from calendly import reconcile_tick as calendly_reconcile_tick
-from curator import curator_router, push_daily_batch, publish_tick
-from growth_agent import growth_router, run_growth_tick
 from quiz_atmosfera import atm_router, run_atm_nextday_tick
 from quiz_para import para_router
 from sixsec import sixsec_router, run_sixsec_tick
@@ -136,20 +128,20 @@ async def main():
     # Служебный админ-хэндлер (chat_id из форварда) — на dp, раньше всех роутеров.
     dp.message.register(_admin_chat_id, F.forward_origin, F.from_user.id.in_(_ADMIN_IDS))
     dp.update.outer_middleware(DMInspectMiddleware())
-    # curator_router ПЕРВЫМ: текст-фильтр режима правки (только когда куратор
-    # awaiting='edit') должен перехватить сообщение Алёны раньше AI-встречи и catch-all.
-    # alena_router и guide_router: их текст-фильтры (активная встреча / практика)
-    # должны сработать раньше catch-all fallback в router.
-    # alena РАНЬШE guide: активная встреча с Алёной перебивает зависшую практику.
-    dp.include_router(curator_router)
-    dp.include_router(alena_router)
-    dp.include_router(guide_router)
-    # book_router: /zapis + callback'и записи 1:1 — раньше главного router,
-    # чтобы команду записи не перехватил catch-all fallback.
-    dp.include_router(book_router)
-    # growth_router — только callback-кнопки ревью реактивации (без текст-фильтров,
-    # конфликтов с catch-all не создаёт). После основного router тоже ок.
-    dp.include_router(growth_router)
+    # СНЯТО 29.08: curator_router — контент-конвейер, чей единственный батч
+    # (curator_data.py) собран под мёртвую воронку: тест Тени и колода
+    # «Карта перепутья». Автопубликация в канал уже снята ниже; ручные команды
+    # /curate_* тоже отключены, чтобы этот батч не ушёл в канал руками.
+    # Контент новой воронки живёт в ~/kydaidy-alyona/content/voronka-2026-08/.
+    # СНЯТО 29.08 (мандат Кая 28.08 «старая воронка мертва целиком»): роутеры
+    # мёртвой воронки «Манифест» больше не подключаются — они уносили живым людям
+    # Клуб «Манифест» 990 ₽, воркбук «Манифест 7» и запись на «Манифест 1:1».
+    #   alena_router  (alena_chat)      — AI-встреча, закрывавшая на Клуб;
+    #   guide_router  (manifest7_guide) — AI-проводник по воркбуку;
+    #   book_router   (booking)         — подписка «Манифест 1:1»;
+    #   growth_router (growth_agent)    — реактивация обратно в Клуб.
+    # Код оставлен в репозитории (решение о его судьбе — за Каем), но ни одна
+    # его строка больше не достижима из чата.
     # atm_router (тест «Атмосфера дома», E1/T1): /dom + callback'и atmq:* —
     # раньше главного router, чтобы /dom не съел catch-all fallback.
     dp.include_router(atm_router)
@@ -175,7 +167,6 @@ async def main():
     dp.include_router(checkin_router)
     dp.include_router(router)
 
-    # Запуск nurture-tick каждый час
     scheduler = AsyncIOScheduler()
     # Цепочка 7 дней воронки «Сценарий отношений» (28.08). Старая
     # nurture-серия по «5 поворотам» снята: воронка «Манифест» закрыта.
@@ -186,48 +177,13 @@ async def main():
     # идемпотентны по отметке ДО отправки — час опоздания дешевле дубля.
     scheduler.add_job(run_dnevnik_tick, "interval", hours=1, args=[bot])
     scheduler.add_job(run_dnevnik_itog_tick, "interval", hours=1, args=[bot])
-    # Контент-конвейер: утренняя рассылка батча куратору + дрип-автопостинг в канал.
-    scheduler.add_job(
-        push_daily_batch, "cron",
-        hour=settings.curator_push_hour, minute=0,
-        timezone=settings.curator_tz, args=[bot])
-    scheduler.add_job(
-        publish_tick, "interval",
-        minutes=settings.curator_publish_every_min, args=[bot])
-    # Hermes-руки: дневной тик реактивации. Сам джоб no-op, пока
-    # growth_agent_enabled=False — кандидаты не набираются, никому ничего не шлётся.
-    scheduler.add_job(
-        run_growth_tick, "interval",
-        hours=settings.growth_tick_hours, args=[bot])
-    # Hermes #1: мягкий оффер Клуба на «затихшей» AI-встрече (человек замолчал
-    # на пике). Джоб no-op, если stale_nudge_enabled=False. Проверка — часто,
-    # порог молчания (stale_nudge_minutes) фильтрует сам запрос.
-    scheduler.add_job(
-        run_stale_session_tick, "interval",
-        minutes=settings.stale_nudge_tick_min, args=[bot])
-    # Re-engage (Кай 09.07): мягкое «я тут, жду» ДО оффер-нуджа, если человек затих.
-    scheduler.add_job(
-        run_reengage_tick, "interval",
-        minutes=settings.stale_nudge_tick_min, args=[bot])
-    # T-1 (03.07): само-восстановление хода, убитого редеплоем (реплика клиентки
-    # без ответа >2 мин) — доотвечаем сами, тишина себя чинит.
-    scheduler.add_job(run_orphan_turn_tick, "interval", minutes=2, args=[bot])
-    # Батч Б: мёртвая встреча (клиент замолк после наджа, turns≥2, молчит
-    # ≥dead_session_minutes) закрывается ВДОГОНКУ с оффером — иначе лид уходит мимо
-    # оффер-пути (ни оффера, ни followup-серии). No-op, если таких встреч нет.
-    scheduler.add_job(
-        run_dead_session_tick, "interval",
-        minutes=settings.dead_session_tick_min, args=[bot])
-    # Спящая лестница 1:1 (совещание 03.07): члену Клуба ≥14 дней — разовое
-    # приглашение на живой разбор. При 0 членов — no-op.
-    scheduler.add_job(run_club_ladder_tick, "interval", hours=24, args=[bot])
-    # Волна 1 (H6/H7): дожим после оффера — серия из 3 касаний (45м/24ч/72ч).
-    # Оплатившие отфильтровываются в самом запросе; no-op при FOLLOWUP_ENABLED=0.
-    # СНЯТО 28.08 (мандат Кая): дожим слал живым людям оффер закрытой
-    # воронки — Клуб «Манифест» 990 ₽. Продукты новые, тексты дожима под них
-    # ещё не написаны; молчание лучше неверного оффера.
-    # scheduler.add_job(run_followup_tick, "interval",
-    #                   minutes=settings.followup_tick_min, args=[bot])
+    # СНЯТО 29.08 (мандат Кая 28.08): тики мёртвой воронки «Манифест» больше не
+    # заводятся — каждый из них сам, по таймеру, слал живым людям оффер закрытого
+    # продукта. Сняты: push_daily_batch + publish_tick (батч контента по тесту Тени
+    # и колоде «Карта перепутья»), run_growth_tick (реактивация в Клуб),
+    # run_stale_session_tick / run_reengage_tick / run_orphan_turn_tick /
+    # run_dead_session_tick / run_club_ladder_tick (обслуживали AI-встречу,
+    # закрывавшую на Клуб 990 ₽). Дожим run_followup_tick снят ещё 28.08.
     # Тест «Атмосфера дома»: next-day чек ~20 ч после прохождения (E1/T1).
     scheduler.add_job(run_atm_nextday_tick, "interval", minutes=30, args=[bot])
     # «6 секунд» (Шаг 2, on-ramp): вечера 2–3 через ~20 ч после предыдущего.
@@ -238,11 +194,6 @@ async def main():
     # паузу и уже ответившие пропускаются, поэтому повторный запуск не задваивает.
     scheduler.add_job(run_checkin_tick, "cron", hour=21, minute=0,
                       timezone="Europe/Moscow", args=[bot])
-    # HeyGen кредит-монитор: заранее пишет Каю, когда кредиты на исходе (живые
-    # кружки коуча их тратят). No-op, пока не задан HEYGEN_API_KEY.
-    scheduler.add_job(
-        run_credit_check, "interval",
-        hours=settings.credit_check_hours, args=[bot])
     # Подписочный 1:1: страховка сброса счётчика встреч. Если вебхук продления
     # потерялся, cron добьёт sessions_left до тарифа активным подписчикам, чей
     # период старше ~30 дней — оплативший не заперт со 2-го месяца.
@@ -253,22 +204,7 @@ async def main():
                       minutes=settings.calendly_poll_min, args=[bot])
     scheduler.start()
 
-    # Батч Б: прогнать orphan-восстановление СРАЗУ на старте (не ждать первого
-    # интервального тика). Редеплой рвёт ход и рестартит планировщик — до 5 мин
-    # тишины; разовый create_task чинит подвисшие встречи мгновенно после подъёма.
-    asyncio.create_task(run_orphan_turn_tick(bot))
-    # Страховка сна на Render free (диагноз 15.07): web-сервис на free-плане
-    # засыпает после ~15 мин без ВХОДЯЩЕГО HTTP → APScheduler замирает ровно в окна
-    # молчания, которые ловят stale/dead-тики (у затихшей встречи nudged_at так и
-    # остаётся NULL, dead-тик её не берёт — потерянный лид). Реальный фикс — внешний
-    # keep-alive пинг на /health каждые 10–14 мин (UptimeRobot/cron-job.org) или уход
-    # с free-плана. Здесь — подстраховка: как только инстанс проснулся (любой апдейт/
-    # деплой/пинг), сразу подметаем просроченные затихшие и мёртвые встречи, не ожидая
-    # интервального тика. Тики крэш-сейф внутри; no-op, если таких встреч нет.
-    asyncio.create_task(run_stale_session_tick(bot))
-    asyncio.create_task(run_dead_session_tick(bot))
-
-    # Webhook server (для Tally + Tribute)
+    # Webhook server (Tribute; эндпоинт Tally снят вместе со старым квизом)
     app = web.Application()
     setup_webhooks(app, bot)
 
@@ -278,14 +214,13 @@ async def main():
     await site.start()
     logger.info(f"Webhook server started on port {settings.port}")
 
-    # Синяя кнопка меню открывает Mini App «Дом семьи» — основной продукт
-    # (решение Кая 26.07): тест, опоры, чек-ин и ритуалы живут там.
+    # Синяя кнопка меню открывает Mini App: тест, практика и дневник живут там.
     # Ставится при каждом старте: операция идемпотентная, отдельная миграция ни к чему.
     try:
         from aiogram.types import MenuButtonWebApp, WebAppInfo
         from handlers import APP_URL
         await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text="Дом семьи",
+            menu_button=MenuButtonWebApp(text="Открыть приложение",
                                          web_app=WebAppInfo(url=APP_URL)))
         logger.info("menu button -> Mini App")
     except Exception:
