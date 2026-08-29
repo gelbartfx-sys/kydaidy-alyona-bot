@@ -17,8 +17,9 @@ import logging
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
-from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram import Bot, Router
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, WebAppInfo
 
 from config import settings
 from database import (
@@ -27,6 +28,8 @@ from database import (
 )
 
 logger = logging.getLogger(__name__)
+
+dnevnik_router = Router()
 
 PIN_TEXT = ("Отметьте последние часы: стало ближе или дальше — и почему.\n\n"
             "Одна отметка занимает минуту. Из этих минут к разбору соберётся картина, "
@@ -47,6 +50,17 @@ def _app_url(put: str = "#/dnevnik") -> str:
 def _kbd(label: str, put: str = "#/dnevnik") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=label, web_app=WebAppInfo(url=_app_url(put)))]])
+
+
+@dnevnik_router.message(Command("dnevnik"))
+async def cmd_dnevnik(msg: Message):
+    """Отдельная дверь в дневник.
+
+    Раньше вход был ровно один — конец второго теста. Тот, кто проходил тесты
+    раньше (а это все, кто уже в боте), попасть в дневник не мог вовсе: заново
+    тест никто не проходит. Команда открывает его напрямую.
+    """
+    await predlozhit(msg, msg.from_user.id)
 
 
 async def predlozhit(msg, tg_id: int) -> None:

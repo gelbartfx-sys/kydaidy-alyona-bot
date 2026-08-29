@@ -161,6 +161,10 @@ async def main():
     # узкий сборщик ответов не должен перехватывать прохождение теста.
     from razbor import razbor_router
     dp.include_router(razbor_router)
+    # Дневник отношений (29.08): команда /dnevnik — отдельная дверь для тех,
+    # кто прошёл тесты раньше и до конца второго теста больше не дойдёт.
+    from dnevnik import dnevnik_router
+    dp.include_router(dnevnik_router)
     # sixsec_router («6 секунд», on-ramp): callback'и six:* — раньше главного
     # router, чтобы не съел catch-all fallback. Инвайт в конце реюзит atmq:invite
     # (в atm_router выше). Только callback'и, текст-фильтров нет — конфликтов нет.
