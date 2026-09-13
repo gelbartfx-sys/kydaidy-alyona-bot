@@ -23,6 +23,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import drip_due, drip_advance, drip_stop, log_event
 import quiz_para_data as d
+import efir
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,16 @@ def _fmt(text: str, dynamic: str | None, strategy: str | None) -> str:
 
 
 def _kbd(day: int) -> InlineKeyboardMarkup | None:
-    """Кнопка есть только там, где есть следующий шаг: практика и разбор."""
+    """Кнопка есть только там, где есть следующий шаг: практика и разбор.
+
+    Эфир включён (13.09): призыв каждого дня — запись на ближайший эфир, разбор
+    уходит после дневника (vstrecha.dopusk). Практика третьего дня остаётся."""
+    if efir.vklyuchen():
+        ryady = [[InlineKeyboardButton(text=efir.BTN_ZAPIS, callback_data="efir:zapis")]]
+        if day == 3:
+            ryady.insert(0, [InlineKeyboardButton(text=d.DRIP_DAY3_BTN,
+                                                  callback_data="drip_practice")])
+        return InlineKeyboardMarkup(inline_keyboard=ryady)
     if day == 3:
         return InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=d.DRIP_DAY3_BTN,
@@ -49,13 +59,22 @@ def _kbd(day: int) -> InlineKeyboardMarkup | None:
     return None
 
 
+def _tekst_dnya(day: int) -> str | None:
+    """Текст дня как есть. С эфиром меняется только призыв седьмого дня: его
+    абзацы про разбор уступают место зову на эфир, первый абзац остаётся."""
+    text = d.DRIP_DAYS.get(day)
+    if text and day == 7 and efir.vklyuchen():
+        return text.split("\n\n")[0] + "\n\n" + efir.EFIR_DRIP_PRIZYV
+    return text
+
+
 async def run_drip_tick(bot: Bot):
     """Тик цепочки. Вызывается планировщиком раз в час."""
-    rows = await drip_due()
+    rows = await drip_due(bez_efira=efir.vklyuchen())
     for row in rows:
         tg_id = row["tg_id"]
         day = int(row["drip_day"] or 0) + 1
-        text = d.DRIP_DAYS.get(day)
+        text = _tekst_dnya(day)
         if not text:
             await drip_stop(tg_id)
             continue

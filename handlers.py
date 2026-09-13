@@ -234,6 +234,16 @@ async def cmd_start_with_deeplink(message: Message, command: CommandObject):
         await show_intro(message, user.id, source or "razbor")
         return
 
+    # Запись на эфир-воркшоп (13.09): ?start=efir (+ суффикс efir__site). Только при
+    # включённом эфире — выключенным бот видит здесь прежнюю метку источника.
+    import efir
+    if efir.vklyuchen() and (args == "efir" or args.startswith("efir__")):
+        _, source = _split_source(args)
+        await upsert_user(user.id, user.username, user.first_name)
+        await set_user_source(user.id, source or "efir")
+        await efir.pokazat_vybor(message, user.id, source or "efir")
+        return
+
     # Старые функциональные ссылки мёртвой воронки (?start=test, ?start=pair_<uid>,
     # ?start=povorot3, ?start=s_<код> и ?start=shadow_<код>) сняты 29.08: они вели в тест
     # «Атмосфера дома», в карту перепутья и в тест Тени. Метка источника с них

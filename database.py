@@ -173,7 +173,11 @@ CREATE TABLE IF NOT EXISTS para_quiz (
     dynamic TEXT,
     dynamic2 TEXT,
     strategy TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Цепочка 7 дней: в D1 докатывается из _RUNTIME_MIGRATIONS, а на SQLite
+    -- колонок не было — drip_due молча отдавал [], и проверки шли мимо цепочки.
+    drip_day INTEGER DEFAULT 0,
+    drip_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS couples (
@@ -278,6 +282,25 @@ CREATE TABLE IF NOT EXISTS most_pisma (
     prochitano_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Запись на эфир-воркшоп (efir.py, 13.09). seans — начало в UTC 'YYYY-MM-DD HH:MM'.
+-- status: active → prishla | ne_prishla | perenos. Одна активная запись на
+-- человека держится индексом, а не порядком вызовов — как бронь в vstrechi.
+CREATE TABLE IF NOT EXISTS efir_zapisi (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER NOT NULL,
+    username TEXT,
+    seans TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    istochnik TEXT,
+    napomnil_utro TIMESTAMP,
+    napomnil_chas TIMESTAMP,
+    napomnil_5min TIMESTAMP,
+    napomnil_posle TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS efir_odna_aktivnaya
+    ON efir_zapisi(tg_id) WHERE status = 'active';
 """
 
 
@@ -626,6 +649,22 @@ _RUNTIME_MIGRATIONS = (
         prochitano_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    # Запись на эфир-воркшоп (13.09), см. комментарий в SCHEMA.
+    """CREATE TABLE IF NOT EXISTS efir_zapisi (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER NOT NULL,
+    username TEXT,
+    seans TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    istochnik TEXT,
+    napomnil_utro TIMESTAMP,
+    napomnil_chas TIMESTAMP,
+    napomnil_5min TIMESTAMP,
+    napomnil_posle TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS efir_odna_aktivnaya
+    ON efir_zapisi(tg_id) WHERE status = 'active'""",
 )
 
 
@@ -2085,7 +2124,7 @@ async def render_bank_card(couple_id: int) -> str:
 
 # ── Воронка «Сценарий отношений»: цепочка 7 дней и заявки на разбор ──────────
 
-async def drip_due(limit: int = 50):
+async def drip_due(limit: int = 50, bez_efira: bool = False):
     """Кому пора следующий день цепочки: тест 2 пройден, сутки с прошлой
     отправки истекли, семь дней ещё не выданы. Крэш-сейф (нет колонок → []).
 
@@ -2097,7 +2136,10 @@ async def drip_due(limit: int = 50):
             "FROM para_quiz WHERE strategy IS NOT NULL "
             "AND COALESCE(drip_day, 0) < 7 "
             "AND datetime(COALESCE(drip_at, created_at), '+20 hours') < datetime('now') "
-            f"LIMIT {int(limit)}", fetch="all") or []
+            # Эфир включён: записанному на эфир цепочка не идёт. Фильтр в SQL, а не
+            # в цикле: иначе записанные забили бы LIMIT и заперли очередь остальным.
+            + ("AND tg_id NOT IN (SELECT tg_id FROM efir_zapisi) " if bez_efira else "")
+            + f"LIMIT {int(limit)}", fetch="all") or []
     except Exception:
         logger.warning("drip_due failed (continuing)", exc_info=True)
         return []
@@ -2408,3 +2450,75 @@ async def vstrecha_napomnil(vstrecha_id: int) -> None:
                     (vstrecha_id,))
     except Exception:
         logger.warning("vstrecha_napomnil failed (continuing)", exc_info=True)
+
+
+# ── Эфир-воркшоп (efir.py, 13.09) ────────────────────────────────────────────
+
+async def efir_zapisat(tg_id: int, username: str | None, seans: str,
+                       istochnik: str | None, uzhe_otmecheno: tuple = ()) -> bool:
+    """Записать на сеанс. Прежняя активная запись уходит в 'perenos' — у человека
+    одна активная запись. uzhe_otmecheno — касания, чьё время прошло к моменту
+    записи (утро в день эфира после 10:00): их не шлём задним числом."""
+    await _exec("UPDATE efir_zapisi SET status = 'perenos' "
+                "WHERE tg_id = ? AND status = 'active'", (tg_id,))
+    kolonki = "".join(f", napomnil_{k}" for k in uzhe_otmecheno)
+    znacheniya = ", CURRENT_TIMESTAMP" * len(uzhe_otmecheno)
+    try:
+        await _exec(
+            f"INSERT INTO efir_zapisi (tg_id, username, seans, istochnik{kolonki}) "
+            f"VALUES (?, ?, ?, ?{znacheniya})", (tg_id, username, seans, istochnik))
+    except Exception:
+        logger.warning("efir_zapisat failed", exc_info=True)
+        return False
+    return True
+
+
+async def efir_moya(tg_id: int):
+    """Активная запись человека или None."""
+    return await _exec("SELECT * FROM efir_zapisi WHERE tg_id = ? AND status = 'active'",
+                       (tg_id,), fetch="one")
+
+
+async def efir_aktivnye(limit: int = 500):
+    try:
+        return await _exec("SELECT * FROM efir_zapisi WHERE status = 'active' "
+                           f"ORDER BY seans LIMIT {int(limit)}", fetch="all") or []
+    except Exception:
+        logger.warning("efir_aktivnye failed (continuing)", exc_info=True)
+        return []
+
+
+async def efir_otmetit(zapis_id: int, kasaniya: tuple) -> None:
+    """Отметка касаний. Ставится ДО отправки — пропуск дешевле дубля."""
+    sets = ", ".join(f"napomnil_{k} = COALESCE(napomnil_{k}, CURRENT_TIMESTAMP)"
+                     for k in kasaniya)
+    await _exec(f"UPDATE efir_zapisi SET {sets} WHERE id = ?", (zapis_id,))
+
+
+async def efir_status(zapis_id: int, status: str) -> None:
+    await _exec("UPDATE efir_zapisi SET status = ? WHERE id = ?", (status, zapis_id))
+
+
+async def efir_propuskov(tg_id: int) -> int:
+    row = await _exec("SELECT COUNT(*) AS n FROM efir_zapisi "
+                      "WHERE tg_id = ? AND status = 'ne_prishla'", (tg_id,), fetch="one")
+    return int(row["n"]) if row else 0
+
+
+async def efir_prishla_sobytie(tg_id: int, seans: str) -> bool:
+    """Комната пишет событие efir_prishla с сеансом в meta."""
+    row = await _exec("SELECT 1 AS da FROM funnel_events WHERE tg_id = ? "
+                      "AND event = 'efir_prishla' AND meta = ? LIMIT 1",
+                      (tg_id, seans), fetch="one")
+    return bool(row)
+
+
+async def vstrecha_poyas(tg_id: int) -> int | None:
+    """Пояс человека (минуты от UTC) из последней записи на встречу, иначе None."""
+    try:
+        row = await _exec("SELECT tz_min FROM vstrechi WHERE tg_id = ? "
+                          "ORDER BY id DESC LIMIT 1", (tg_id,), fetch="one")
+        return int(row["tz_min"]) if row and row.get("tz_min") is not None else None
+    except Exception:
+        logger.warning("vstrecha_poyas failed (continuing)", exc_info=True)
+        return None

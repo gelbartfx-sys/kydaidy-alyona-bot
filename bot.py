@@ -160,6 +160,11 @@ async def main():
     # выбора времени. Только callback'и vst:* и две команды — конфликтов нет.
     from vstrecha import vstrecha_router
     dp.include_router(vstrecha_router)
+    # Эфир-воркшоп (13.09): /efir и кнопки efir:*. Только при включённом флаге —
+    # выключенным /efir уходит туда же, куда уходил до эфира.
+    from efir import efir_router, run_efir_tick
+    if settings.efir_enabled:
+        dp.include_router(efir_router)
     dp.include_router(router)
 
     scheduler = AsyncIOScheduler()
@@ -196,6 +201,10 @@ async def main():
     # опаздывает на разницу, как сторож с шагом опроса больше порога.
     from vstrecha import run_vstrecha_tick
     scheduler.add_job(run_vstrecha_tick, "interval", minutes=10, args=[bot])
+    # Касания эфира: утро, за час, за пять минут, «не смогла». Шаг пять минут —
+    # иначе «начинаем» опаздывает на разницу. Тик сам молчит при выключенном флаге.
+    if settings.efir_enabled:
+        scheduler.add_job(run_efir_tick, "interval", minutes=5, args=[bot])
     scheduler.start()
 
     # Webhook server (Tribute; эндпоинт Tally снят вместе со старым квизом)
