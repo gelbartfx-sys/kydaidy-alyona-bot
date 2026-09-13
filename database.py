@@ -257,6 +257,17 @@ CREATE TABLE IF NOT EXISTS vstrechi (
 -- Индекс частичный: отменённая бронь освобождает слот.
 CREATE UNIQUE INDEX IF NOT EXISTS vstrechi_slot_zanyat
     ON vstrechi(nachalo) WHERE status = 'booked';
+
+-- Мост с ChatGPT Алёны (most.py, 13.09.2026): письма в обе стороны.
+CREATE TABLE IF NOT EXISTS most_pisma (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    napravlenie TEXT NOT NULL,
+    tema TEXT,
+    tekst TEXT NOT NULL,
+    otvet_na INTEGER,
+    prochitano_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -596,6 +607,15 @@ _RUNTIME_MIGRATIONS = (
     )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS vstrechi_slot_zanyat
         ON vstrechi(nachalo) WHERE status = 'booked'""",
+    """CREATE TABLE IF NOT EXISTS most_pisma (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        napravlenie TEXT NOT NULL,
+        tema TEXT,
+        tekst TEXT NOT NULL,
+        otvet_na INTEGER,
+        prochitano_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
 )
 
 

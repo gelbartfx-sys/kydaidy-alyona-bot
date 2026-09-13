@@ -1,0 +1,69 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Мост Кай ↔ Алёна",
+    "description": "Почтовый ящик между командой Кая и ChatGPT Алёны: забрать новые письма от Кая и отправить ответ Алёны.",
+    "version": "1.0.0"
+  },
+  "servers": [{ "url": "https://kydaidy-bot.onrender.com" }],
+  "paths": {
+    "/most/novoe": {
+      "get": {
+        "operationId": "zabratNovoe",
+        "summary": "Забрать новые письма от Кая (до 5 за раз; забранное второй раз не придёт)",
+        "responses": {
+          "200": {
+            "description": "Список писем",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pisma": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "integer", "description": "Номер письма — указывать в ответе как otvet_na" },
+                          "tema": { "type": "string" },
+                          "tekst": { "type": "string" },
+                          "created_at": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/most/otvet": {
+      "post": {
+        "operationId": "otpravitOtvet",
+        "summary": "Отправить Каю ответ Алёны (только после того, как Алёна его подтвердила)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["tekst"],
+                "properties": {
+                  "otvet_na": { "type": "integer", "description": "Номер письма, на которое это ответ" },
+                  "tema": { "type": "string" },
+                  "tekst": { "type": "string", "description": "Текст ответа, до 60 000 знаков" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Ответ доставлен" },
+          "400": { "description": "Пустой или слишком длинный текст" }
+        }
+      }
+    }
+  }
+}

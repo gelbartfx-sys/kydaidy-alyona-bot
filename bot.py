@@ -201,6 +201,8 @@ async def main():
     # Webhook server (Tribute; эндпоинт Tally снят вместе со старым квизом)
     app = web.Application()
     setup_webhooks(app, bot)
+    from most import setup_most  # мост с ChatGPT Алёны (13.09)
+    setup_most(app, bot)
 
     runner = web.AppRunner(app)
     await runner.setup()
