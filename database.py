@@ -258,6 +258,16 @@ CREATE TABLE IF NOT EXISTS vstrechi (
 CREATE UNIQUE INDEX IF NOT EXISTS vstrechi_slot_zanyat
     ON vstrechi(nachalo) WHERE status = 'booked';
 
+-- Заявки на разбор. Раньше жили только в _RUNTIME_MIGRATIONS (D1), и на SQLite
+-- заявка молча не сохранялась — проверки ходили мимо неё (найдено 13.09).
+CREATE TABLE IF NOT EXISTS razbor_zayavki (
+    tg_id INTEGER PRIMARY KEY,
+    username TEXT,
+    answers TEXT,
+    status TEXT DEFAULT 'new',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Мост с ChatGPT Алёны (most.py, 13.09.2026): письма в обе стороны.
 CREATE TABLE IF NOT EXISTS most_pisma (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

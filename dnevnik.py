@@ -36,8 +36,8 @@ PIN_TEXT = ("Отметьте последние часы: стало ближе
             "которую по памяти не восстановить.")
 PIN_BTN = "Поставить отметку"
 
-ITOG_ZAGOLOVOK = "Ваша неделя собрана"
-ITOG_BTN = "Разобрать это с Алёной"
+ITOG_ZAGOLOVOK = "Твоя неделя собрана"
+ITOG_BTN = "Записаться на разбор"
 
 DNI_RU = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
@@ -70,8 +70,8 @@ async def predlozhit(msg, tg_id: int) -> None:
             "Тесты показали, как устроен ваш цикл. Дневник покажет, когда он "
             "запускается на самом деле.\n\n"
             "Неделя отметок: каждые несколько часов — стало ближе или дальше и "
-            "почему. Можно вести одному или вдвоём с партнёром. По итогам недели "
-            "получите срез, и с ним будет что разбирать на встрече.",
+            "почему. Можно вести одной или вдвоём с партнёром. По итогам недели "
+            "получишь срез — с ним я и приду к тебе на разбор.",
             parse_mode=None, reply_markup=_kbd("Открыть дневник"))
         await log_event(tg_id, "dnevnik_predlozhen")
     except Exception:
@@ -166,8 +166,11 @@ async def run_dnevnik_itog_tick(bot: Bot) -> None:
         try:
             await bot.send_message(
                 tg_id, f"{ITOG_ZAGOLOVOK}.\n\n{srez}\n\n"
-                "Разбор — двадцать минут лично с Алёной, видеозвонком. Первые десять бесплатно.",
-                parse_mode=None, reply_markup=_kbd(ITOG_BTN, "#/zayavka"))
+                "Теперь можно на разбор — двадцать минут вдвоём со мной, видеозвонком. Бесплатно.",
+                # В бот, а не в Mini App (#/zayavka): три вопроса перед временем
+                # задаются в боте (решение Кая 13.09), экран приложения их не знает.
+                parse_mode=None, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=ITOG_BTN, callback_data="razbor_start")]]))
             await log_event(tg_id, "dnevnik_itog", str(len(otmetki)))
         except Exception:
             logger.error("dnevnik itog send failed for %s", tg_id, exc_info=True)

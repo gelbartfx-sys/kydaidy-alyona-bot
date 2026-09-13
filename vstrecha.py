@@ -37,8 +37,8 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message)
 
 from config import ADMIN_IDS, settings
-from database import (get_meta, log_event, set_meta, vstrecha_moya,
-                      vstrecha_napomnil, vstrecha_napomnit_due,
+from database import (dnevnik_get, get_meta, log_event, razbor_get, set_meta,
+                      vstrecha_moya, vstrecha_napomnil, vstrecha_napomnit_due,
                       vstrecha_otmenit, vstrecha_vladelec,
                       vstrecha_zabronirovat, vstrecha_zanyatye)
 
@@ -71,7 +71,7 @@ POYASA = (
     ("Омск", 360), ("Красноярск", 420),
     ("Иркутск", 480), ("Якутск", 540),
     ("Владивосток", 600), ("Европа (Берлин, Париж)", 120),
-    ("Лондон", 60), ("Другой — напишу Алёне", 180),
+    ("Лондон", 60), ("Другой — напишу тебе здесь", 180),
 )
 
 _RX_OKNO = re.compile(
@@ -209,6 +209,49 @@ async def svobodnye(tz_min: int = MSK_SDVIG):
     return [s for s in vse if klyuch(s) not in zanyatye]
 
 
+def defitsit(slots, dney: int = 7) -> str:
+    """Честный дефицит (решение Кая 13.09): число окон и ближайшее — из тех же
+    слотов, что видит человек при записи, а не число в тексте. Чистая функция."""
+    if not slots:
+        return NET_VREMENI
+    granica = slots[0] + timedelta(days=dney)
+    n = sum(1 for s in slots if s < granica)
+    return (f"На ближайшие {dney} дней у меня {n} {okon(n)}. "
+            f"Ближайшее — {po_russki(slots[0], MSK_SDVIG)} по Москве.")
+
+
+def okon(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "свободное окно"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "свободных окна"
+    return "свободных окон"
+
+
+async def dopusk(tg_id: int) -> tuple[bool, str]:
+    """Можно ли на разбор (ТЗ 13.09: созвон — только после недели дневника).
+
+    Пускаем: Кая и Алёну; у кого уже есть заявка (после дневника она создаётся
+    сама, `dnevnik.run_dnevnik_itog_tick`); у кого неделя дневника закрыта.
+    Иначе — текст, почему пока нет, с тем, что делать дальше.
+    """
+    if tg_id in ADMIN_IDS or await razbor_get(tg_id):
+        return True, ""
+    dn = await dnevnik_get(tg_id)
+    if dn and dn.get("itog_sent"):
+        return True, ""
+    if dn and dn.get("konec_ts"):
+        konec = datetime.fromisoformat(str(dn["konec_ts"])[:19])
+        return False, (f"{RAZBOR_POSLE_DNEVNIKA}\n\nТвоя неделя закончится "
+                       f"{po_russki(konec, MSK_SDVIG)} по Москве — и я сразу позову тебя.")
+    return False, f"{RAZBOR_POSLE_DNEVNIKA}\n\nНачни дневник — это неделя коротких отметок."
+
+
+RAZBOR_POSLE_DNEVNIKA = (
+    "Разбор я провожу после недели дневника. Так я приду к тебе не с общими "
+    "словами, а с твоей картой: когда и почему между вами становится дальше.")
+
+
 # ── Экраны ───────────────────────────────────────────────────────────────────
 
 def kbd_zapis(text: str = "Выбрать время") -> InlineKeyboardMarkup:
@@ -275,9 +318,28 @@ def _kbd_moya() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="Отменить", callback_data="vst:otmena")]])
 
 
-NET_VREMENI = ("Свободного времени сейчас нет — Алёна открывает новые окна "
-               "каждую неделю. Напишу, как только появится: просто дай знать "
-               "здесь, и я вернусь с временем.")
+NET_VREMENI = ("Свободного времени сейчас нет — я открываю новые окна "
+               "каждую неделю. Напиши мне здесь, и я вернусь к тебе со временем.")
+
+
+def kbd_dnevnik() -> InlineKeyboardMarkup:
+    """Дверь в дневник с экрана «разбор после дневника». Импорт внутри: dnevnik
+    тянет базу и планировщик, а запись должна импортироваться без них."""
+    from dnevnik import _kbd
+    return _kbd("Открыть дневник")
+
+
+async def ne_pustit(msg: Message, tg_id: int, source: str) -> bool:
+    """True — человек остановлен экраном «разбор после дневника»."""
+    ok, pochemu = await dopusk(tg_id)
+    if ok:
+        return False
+    await msg.answer(pochemu, parse_mode=None, reply_markup=kbd_dnevnik())
+    try:
+        await log_event(tg_id, "razbor_do_dnevnika", source or None)
+    except Exception:
+        logger.debug("log_event razbor_do_dnevnika failed", exc_info=True)
+    return True
 
 
 async def pokazat_vhod(msg: Message, tg_id: int, source: str = "") -> None:
@@ -287,8 +349,16 @@ async def pokazat_vhod(msg: Message, tg_id: int, source: str = "") -> None:
         await msg.answer(
             f"Твоя встреча: {po_russki(iz_klyucha(moya['nachalo']), moya['tz_min'])} "
             f"по твоему времени.\n\n"
-            f"Двадцать минут, видеозвонком в Телеграме — Алёна позвонит сюда.",
+            f"Двадцать минут, видеозвонком в Телеграме — я позвоню тебе сюда.",
             parse_mode=None, reply_markup=_kbd_moya())
+        return
+    if await ne_pustit(msg, tg_id, source):
+        return
+    # Три вопроса — перед временем (решение Кая 13.09). Импорт внутри: razbor
+    # сам импортирует этот модуль.
+    from razbor import show_intro, voprosy_zadany
+    if tg_id not in ADMIN_IDS and not voprosy_zadany(await razbor_get(tg_id)):
+        await show_intro(msg, tg_id, source or "vstrecha")
         return
     slots = await svobodnye()
     if not slots:
@@ -296,6 +366,7 @@ async def pokazat_vhod(msg: Message, tg_id: int, source: str = "") -> None:
         return
     await msg.answer(
         "Разбор — двадцать минут, видеозвонком в Телеграме.\n\n"
+        f"{defitsit(slots)}\n\n"
         "Сначала скажи, где ты живёшь: покажу время на твоих часах, "
         "а не на московских.",
         parse_mode=None, reply_markup=_kbd_poyasa())
@@ -399,7 +470,7 @@ async def cb_vstrecha(cb: CallbackQuery):
         kbd = _kbd_vremya(slots, tz_min, den)
         if len(kbd.inline_keyboard) == 1:      # остался только «Другой день»
             await cb.message.answer(
-                "На этот день время разобрали, пока ты выбирал. Возьми другой:",
+                "На этот день время только что разобрали. Возьми другой:",
                 parse_mode=None, reply_markup=_kbd_dni(slots, tz_min))
             return
         await cb.message.answer("Выбери время — оно на твоих часах:",
@@ -445,9 +516,9 @@ async def _zabronirovat(cb: CallbackQuery, tg_id: int, utc: datetime, tz_min: in
 
     await cb.message.answer(
         f"Записала: {po_russki(utc, tz_min)} по твоему времени.\n\n"
-        "Двадцать минут, видеозвонком в Телеграме — Алёна позвонит прямо сюда, "
+        "Двадцать минут, видеозвонком в Телеграме — я позвоню прямо сюда, "
         "ставить ничего не нужно. Напомню за час.\n\n"
-        "Планы поменяются — перенеси сам, командой /vstrecha.",
+        "Планы поменяются — перенести можно командой /vstrecha.",
         parse_mode=None, reply_markup=_kbd_moya())
     try:
         await log_event(tg_id, "vstrecha_zapis", klyuch(utc))
@@ -491,7 +562,7 @@ async def run_vstrecha_tick(bot: Bot) -> None:
             await bot.send_message(
                 int(row["tg_id"]),
                 f"Встреча через {minut(cherez)} — {po_russki(utc, row['tz_min'])} "
-                f"по твоему времени.\n\nАлёна позвонит сюда, видеозвонком. "
+                f"по твоему времени.\n\nЯ позвоню тебе сюда, видеозвонком. "
                 f"Двадцать минут.",
                 parse_mode=None)
             await log_event(int(row["tg_id"]), "vstrecha_napominanie", row["nachalo"])
@@ -548,4 +619,13 @@ if __name__ == "__main__":
     assert [minut(n) for n in (1, 2, 5, 11, 14, 21, 44, 45, 60)] == [
         "1 минуту", "2 минуты", "5 минут", "11 минут", "14 минут",
         "21 минуту", "44 минуты", "45 минут", "60 минут"]
+    # Честный дефицит (13.09): число окон считается из слотов, а не пишется в текст.
+    assert [okon(n) for n in (1, 2, 5, 11, 21, 22)] == [
+        "свободное окно", "свободных окна", "свободных окон", "свободных окон",
+        "свободное окно", "свободных окна"]
+    _t0 = datetime(2026, 9, 14, 7, 0)                       # пн 10:00 МСК
+    _s = [_t0 + timedelta(hours=h) for h in (0, 1, 24, 24 * 8)]   # 4-й — за неделей
+    assert "у меня 3 свободных окна" in defitsit(_s), defitsit(_s)
+    assert "14 сентября, понедельник, 10:00 по Москве" in defitsit(_s), defitsit(_s)
+    assert defitsit([]) == NET_VREMENI
     print("vstrecha self-check OK")

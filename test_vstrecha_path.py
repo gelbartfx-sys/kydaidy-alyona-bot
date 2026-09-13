@@ -25,7 +25,10 @@ os.environ.setdefault("TG_ADMIN_ID", "6271776494")
 for k in ("D1_PROXY_URL", "D1_PROXY_SECRET", "CF_ACCOUNT_ID"):
     os.environ.pop(k, None)
 
+import json                    # noqa: E402
+
 import database as db          # noqa: E402
+import razbor as rz            # noqa: E402
 import vstrecha as v           # noqa: E402
 from config import ADMIN_IDS   # noqa: E402
 
@@ -100,9 +103,42 @@ async def _projti(pechatat: bool = False):
     shag("Алёна (мусор)", alena.posledniy[0])
     assert v.razobrat_okna(await db.get_meta(v.META_OKNA))[0][1] == 600
 
-    # ── 1. Человек открывает запись ──────────────────────────────────────────
+    # ── 0б. Без дневника на разбор не пускает (ТЗ 13.09) ─────────────────────
     ch = _User(CHELOVEK, "klientka")
     msg = _Msg(bot, ch)
+    await v.cmd_vstrecha(msg)
+    tekst, knopki = msg.posledniy
+    assert "после недели дневника" in tekst and "Начни дневник" in tekst, tekst
+    assert not any(k and k.startswith("vst:tz:") for k in knopki), knopki
+    shag("Человек без дневника видит", tekst)
+
+    await db.dnevnik_start(CHELOVEK, 0, "solo", 2)          # неделя идёт
+    await v.cmd_vstrecha(msg)
+    assert "Твоя неделя закончится" in msg.posledniy[0], msg.posledniy[0]
+    shag("Человек в середине недели видит", msg.posledniy[0])
+
+    for uid in (CHELOVEK, VTOROY):                          # неделя закрыта
+        await db.dnevnik_start(uid, 0, "solo", 2)
+        await db.dnevnik_itog_otmetit(uid)
+    # Автозаявка из дневника — как её пишет dnevnik.run_dnevnik_itog_tick.
+    await db.razbor_save(CHELOVEK, None, json.dumps(
+        [rz.DNEVNIK_METKA, "срез недели", "Режим: solo, шаг 2 ч"], ensure_ascii=False))
+
+    # ── 0в. После дневника — сначала три вопроса, потом время (13.09) ────────
+    await v.cmd_vstrecha(msg)
+    assert "razbor_go" in msg.posledniy[1], msg.posledniy
+    shag("После дневника человек видит", msg.posledniy[0])
+    cbq = _Cb(bot, ch, "razbor_go")
+    await rz.cb_razbor_go(cbq)
+    for otvet in ("ссоримся из-за денег", "пробовали молчать", "перестать молчать"):
+        m = _Msg(bot, ch)
+        m.text = otvet
+        await rz.collect(m)
+    zayavka = json.loads((await db.razbor_get(CHELOVEK))["answers"])
+    assert zayavka[0] == rz.DNEVNIK_METKA and zayavka[-1] == "перестать молчать", zayavka
+    await db.razbor_save(VTOROY, "vtoroy", json.dumps(["a", "b", "c"]))
+
+    # ── 1. Человек открывает запись ──────────────────────────────────────────
     await v.cmd_vstrecha(msg)
     tekst, knopki = msg.posledniy
     assert "двадцать минут" in tekst.lower(), tekst
