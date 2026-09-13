@@ -59,6 +59,10 @@ KRUJOK = "file-id-krujka"
 
 # ── Фейковый Telegram ────────────────────────────────────────────────────────
 
+def _nachinaem(t: str) -> bool:
+    return t.startswith("Начинаем") or t.startswith("Начали")
+
+
 def _knopki(kb):
     return [b.callback_data or b.url for r in (kb.inline_keyboard if kb else []) for b in r]
 
@@ -226,7 +230,7 @@ async def proverka_kasaniy() -> list[str]:
         "утро": sum(t.startswith("Доброе утро") and "Вечером" in t for t in teksty),
         "кружок": sum(t == f"<кружок {KRUJOK}>" for t in teksty),
         "за час": sum(t.startswith("Через час эфир") for t in teksty),
-        "5 минут": sum(t == efir.EFIR_5MIN for t in teksty),
+        "5 минут": sum(_nachinaem(t) for t in teksty),
         "не смогла": sum(t.startswith("Вижу, сегодня") for t in teksty),
     }
     for chto, n in schet.items():
@@ -234,7 +238,9 @@ async def proverka_kasaniy() -> list[str]:
             bedy.append(f"касание «{chto}» ушло {n} раз, а должно ровно 1")
     if len(teksty) != 5:
         bedy.append(f"всего сообщений {len(teksty)}, а касаний 5: {teksty}")
-    pyat = [k for t, k in bot.komu(ANYA) if t == efir.EFIR_5MIN]
+    pyat = [k for t, k in bot.komu(ANYA) if _nachinaem(t)]
+    if [t for t in teksty if _nachinaem(t)] != ["Начинаем через 5 минут. Заходи — в чате эфира тебе ответят на вопросы."]:
+        bedy.append(f"«начинаем» не по минуте отправки: {[t for t in teksty if _nachinaem(t)]}")
     if pyat and pyat[0] != [KOMNATA]:
         bedy.append(f"«начинаем» без кнопки комнаты: {pyat[0]}")
 
@@ -244,7 +250,7 @@ async def proverka_kasaniy() -> list[str]:
     bot = _Bot()
     await _zapisat(VERA, datetime(2026, 9, 13, 9))
     await _progon(bot, T0, datetime(2026, 9, 13, 9, 10))
-    t5 = [k for t, k in bot.komu(VERA) if t == efir.EFIR_5MIN]
+    t5 = [k for t, k in bot.komu(VERA) if _nachinaem(t)]
     if t5 != [[]]:
         bedy.append(f"без комнаты «начинаем» пришло не одно и без кнопки: {t5}")
     if not any("Днём" in t for t, _ in bot.komu(VERA)):
@@ -384,7 +390,8 @@ async def proverka_pozdney() -> list[str]:
     for imya in dir(efir):
         if imya.startswith("EFIR_") and isinstance(getattr(efir, imya), str):
             nizh = getattr(efir, imya).lower()
-            for zapret in ("я уже здесь", "жду тебя", "вживую", "в прямом эфире", "я провожу"):
+            for zapret in ("я уже здесь", "жду тебя", "вживую", "в прямом эфире", "я провожу",
+                           "я отвечу"):
                 if zapret in nizh:
                     bedy.append(f"{imya}: «{zapret}» — утверждение живого присутствия")
     return bedy
@@ -418,7 +425,7 @@ async def proverka_granic() -> list[str]:
     # Сеанс идёт (12:10): записаться на него нельзя, в выборе его нет.
     now = datetime(2026, 9, 13, 9, 10)
     await _chisto(True, now)
-    if s12 in efir.blizhayshie(now) or (await _zapisat(OLYA, s12))[0] != efir.EFIR_PROSHEL:
+    if s12 in efir.blizhayshie(now) or (await _zapisat(OLYA, s12))[0] != efir.EFIR_IDET:
         bedy.append("на идущий сеанс можно записаться")
     # Сбой отправки: отметка стоит до отправки — повтора нет.
     await _chisto(True, datetime(2026, 9, 13, 5))
@@ -447,6 +454,141 @@ async def proverka_granic() -> list[str]:
         vse += [t for t, _ in cb.message.otvety]
     if vse.count(krujok) != 1:
         bedy.append(f"три клика после 10:00 — кружков {vse.count(krujok)}, а должен один")
+    return bedy
+
+
+# ── 7. Атомарная смена сеанса ────────────────────────────────────────────────
+
+async def _zapisat_v_dva_shaga(tg_id, username, seans, istochnik, uzhe_otmecheno=()):
+    """Прежняя реализация (канарейка): снять старую, потом вставить новую."""
+    await db._exec("UPDATE efir_zapisi SET status = 'perenos' "
+                   "WHERE tg_id = ? AND status = 'active'", (tg_id,))
+    try:
+        await db._exec("INSERT INTO efir_zapisi (tg_id, username, seans, istochnik) "
+                       "VALUES (?, ?, ?, ?)", (tg_id, username, seans, istochnik))
+    except Exception:
+        return False
+    return True
+
+
+async def proverka_atomarnosti() -> list[str]:
+    bedy = []
+    s12, s20 = datetime(2026, 9, 13, 9), datetime(2026, 9, 13, 17)
+    # Двойное быстрое нажатие — оба раза успех, одна активная.
+    await _chisto(True)
+    a = _Cb(_User(ANYA), f"efir:z:{s12:%Y%m%d%H%M}")
+    b = _Cb(_User(ANYA), f"efir:z:{s12:%Y%m%d%H%M}")
+    await asyncio.gather(efir.cb_efir(a), efir.cb_efir(b))
+    for cb in (a, b):
+        if not cb.message.otvety or not cb.message.otvety[0][0].startswith("Записала тебя"):
+            bedy.append(f"двойное нажатие: показано {cb.message.otvety[:1]}")
+    n = await db._exec("SELECT COUNT(*) AS n FROM efir_zapisi WHERE tg_id=?", (ANYA,), fetch="one")
+    if n["n"] != 1:
+        bedy.append(f"двойное нажатие: строк записи {n['n']}")
+    # Одновременное двойное нажатие после 10:00 МСК в день сеанса — кружок один
+    # (и с нуля, и при переходе с другой записи). Держит RETURNING у UPSERT.
+    for prezhnyaya in (None, datetime(2026, 9, 14, 9)):
+        await _chisto(True, datetime(2026, 9, 13, 7, 30))
+        await db.set_meta(efir.META_KRUJOK_UTRO, KRUJOK)
+        if prezhnyaya:
+            await _zapisat(ANYA, prezhnyaya)
+        a = _Cb(_User(ANYA), f"efir:z:{s12:%Y%m%d%H%M}")
+        b = _Cb(_User(ANYA), f"efir:z:{s12:%Y%m%d%H%M}")
+        await asyncio.gather(efir.cb_efir(a), efir.cb_efir(b))
+        vse = [t for cb in (a, b) for t, _ in cb.message.otvety]
+        if vse.count(f"<кружок {KRUJOK}>") != 1 or vse.count(vse[0]) != 2:
+            bedy.append(f"гонка двух нажатий после 10:00 (прежняя {prezhnyaya}): "
+                        f"{[t[:14] for t in vse]}")
+    await _chisto(True)
+    await _zapisat(ANYA, s12)
+    # Смена сеанса с падением записи: старая запись обязана остаться активной.
+    orig = db._exec
+
+    async def _padaet(sql, params=(), fetch="none"):
+        if sql.startswith("INSERT INTO efir_zapisi"):
+            raise RuntimeError("D1 упал")
+        return await orig(sql, params, fetch)
+    db._exec = _padaet
+    try:
+        await _zapisat(ANYA, s20)
+    finally:
+        db._exec = orig
+    moya = await db.efir_moya(ANYA)
+    if not moya or moya["seans"] != efir.klyuch(s12):
+        bedy.append(f"падение при смене сеанса сняло старую запись: {moya and moya['seans']}")
+    await _zapisat(ANYA, s20)
+    moya = await db.efir_moya(ANYA)
+    if not moya or moya["seans"] != efir.klyuch(s20):
+        bedy.append("смена сеанса не сменила запись")
+    return bedy
+
+
+# ── 8. «Начинаем» по минуте отправки, после конца — тишина ───────────────────
+
+async def proverka_nachinaem() -> list[str]:
+    bedy = []
+    seans = datetime(2026, 9, 13, 17)
+    for otstup, zhdu in ((-3, "Начинаем через 3 минуты."), (0, "Начинаем прямо сейчас."),
+                         (20, "Начали 20 минут назад — заходи, эфир ещё идёт."),
+                         (55, None), (80, None)):
+        await _chisto(True)
+        await _zapisat(ANYA, seans)
+        bot = _Bot()
+        await efir.run_efir_tick(bot, seans + timedelta(minutes=otstup))
+        t5 = [t for t, _ in bot.komu(ANYA) if _nachinaem(t)]
+        if zhdu is None and t5:
+            bedy.append(f"через {otstup} мин после старта (сеанс кончился) ушло «{t5[0][:30]}»")
+        if zhdu and (len(t5) != 1 or not t5[0].startswith(zhdu)):
+            bedy.append(f"в {otstup:+} мин от старта ждала «{zhdu}», пришло {t5}")
+    return bedy
+
+
+# ── 9. Запись на идущий сеанс ────────────────────────────────────────────────
+
+async def proverka_idushchego() -> list[str]:
+    bedy = []
+    now, s12 = datetime(2026, 9, 13, 9, 20), datetime(2026, 9, 13, 9)
+    await _chisto(True, now)
+    tekst, knopki = await _zapisat(ANYA, s12)
+    if tekst != efir.EFIR_IDET:
+        bedy.append(f"идущий сеанс: ответ {tekst!r}")
+    if knopki[:1] != [KOMNATA] or "efir:z:202609131700" not in knopki:
+        bedy.append(f"идущий сеанс: нет комнаты или следующего сеанса {knopki}")
+    if await db.efir_moya(ANYA):
+        bedy.append("идущий сеанс: запись создана")
+    settings.efir_komnata_url = ""
+    tekst, knopki = await _zapisat(ANYA, s12)
+    if KOMNATA in knopki or "efir:z:202609131700" not in knopki:
+        bedy.append(f"идущий сеанс без комнаты: кнопки {knopki}")
+    return bedy
+
+
+# ── 10. Шаг включения: /efir_pogasit ─────────────────────────────────────────
+
+async def proverka_vklyucheniya() -> list[str]:
+    bedy = []
+    now = datetime(2026, 9, 13, 12, 0)
+    await _chisto(False, now)
+    for uid, seans in ((ANYA, "2026-09-10 09:00"), (VERA, "2026-09-13 09:00"),
+                       (OLYA, "2026-09-13 17:00")):
+        await db._exec("INSERT INTO efir_zapisi (tg_id, seans) VALUES (?, ?)", (uid, seans))
+    chuzhoy = _Msg(_User(ANYA), "/efir_pogasit")
+    await efir.cmd_efir_pogasit(chuzhoy)
+    if chuzhoy.otvety or not await db.efir_moya(ANYA):
+        bedy.append("/efir_pogasit сработал не у админа")
+    admin = _Msg(_User(sorted(efir.ADMIN_IDS)[0]), "/efir_pogasit")
+    await efir.cmd_efir_pogasit(admin)
+    if not admin.otvety or "Погасила записей на прошедшие сеансы: 2" not in admin.otvety[0][0]:
+        bedy.append(f"/efir_pogasit при выключенном флаге: {admin.otvety}")
+    if await db.efir_moya(ANYA) or await db.efir_moya(VERA) or not await db.efir_moya(OLYA):
+        bedy.append("погашены не те записи")
+    settings.efir_enabled = True
+    bot = _Bot()
+    await _progon(bot, now, now + timedelta(hours=1), 10)
+    if any(t.startswith("Вижу, сегодня") for _, t, _ in bot.soob):
+        bedy.append("после /efir_pogasit ушло «не смогла» по старой записи")
+    if await db.efir_propuskov(ANYA):
+        bedy.append("погашенная запись посчитана пропуском")
     return bedy
 
 
@@ -483,6 +625,10 @@ async def _vse() -> list[tuple[str, str]]:
     out += [("цепочка", b) for b in await proverka_cepochki()]
     out += [("поздняя", b) for b in await proverka_pozdney()]
     out += [("границы", b) for b in await proverka_granic()]
+    out += [("атомарность", b) for b in await proverka_atomarnosti()]
+    out += [("после конца", b) for b in await proverka_nachinaem()]
+    out += [("идущий", b) for b in await proverka_idushchego()]
+    out += [("включение", b) for b in await proverka_vklyucheniya()]
     out += [("время", b) for b in proverka_vremeni()]
     return out
 
@@ -502,7 +648,13 @@ async def main() -> int:
     orig_otmetit, orig_limit = efir.efir_otmetit, efir.LIMIT_PEREZAPISEY
     orig_vkl, orig_bl = efir.vklyuchen, efir.blizhayshie
     orig_pr, orig_poz = efir.proshedshie, efir.pozdnyaya
-    orig_moya = efir.efir_moya
+    orig_moya, orig_zap = efir.efir_moya, efir.efir_zapisat
+    orig_kas, orig_idet = efir.kasanie, efir.idet
+
+    def _kas_bez_konca(seans, now):
+        k = orig_kas(seans, now)
+        m = (seans - now).total_seconds() / 60
+        return "5min" if k == "" and -efir.DLINA_MIN - efir.POSLE_MIN < m <= 0 else k
 
     async def _net(*a, **kw):
         return None
@@ -533,17 +685,33 @@ async def main() -> int:
         await _kanareyka("повторный клик пересоздаёт запись", "границы",
                          lambda: setattr(efir, "efir_moya", _net),
                          lambda: setattr(efir, "efir_moya", orig_moya)),
+        await _kanareyka("смена сеанса в два запроса", "атомарность",
+                         lambda: setattr(efir, "efir_zapisat", _zapisat_v_dva_shaga),
+                         lambda: setattr(efir, "efir_zapisat", orig_zap)),
+        await _kanareyka("«начинаем» после конца сеанса", "после конца",
+                         lambda: setattr(efir, "kasanie", _kas_bez_konca),
+                         lambda: setattr(efir, "kasanie", orig_kas)),
+        await _kanareyka("идущий сеанс не распознан", "идущий",
+                         lambda: setattr(efir, "idet", lambda s, n: False),
+                         lambda: setattr(efir, "idet", orig_idet)),
     ]
+    async def _vsegda_nova(*a, **kw):          # UPSERT без различения no-op
+        return "nova" if await orig_zap(*a, **kw) else False
+    kanareyki.append(await _kanareyka("гонка нажатий шлёт два кружка", "атомарность",
+                                      lambda: setattr(efir, "efir_zapisat", _vsegda_nova),
+                                      lambda: setattr(efir, "efir_zapisat", orig_zap)))
     kanareyki = [k for k in kanareyki if k]
     if kanareyki:
         for k in kanareyki:
             print(f"КРАСНЫЙ: {k}")
         print("Вердикт не выносится: прибор не умеет краснеть.")
         return 1
-    print("Канарейки: прибор краснеет на всех семи подложенных дефектах "
+    print("Канарейки: прибор краснеет на всех одиннадцати подложенных дефектах "
           "(антидубль снят · лимит снят · флаг игнорирован · вчерашний сеанс в выборе · "
           "утро не помечено при поздней записи · старое правило «< 10 часов» · "
-          "повторный клик пересоздаёт запись).")
+          "повторный клик пересоздаёт запись · смена сеанса в два запроса · "
+          "«начинаем» после конца сеанса · идущий сеанс не распознан · "
+          "гонка нажатий шлёт два кружка).")
 
     bedy = await _vse()
     if bedy:
@@ -554,7 +722,8 @@ async def main() -> int:
     print("ЗЕЛЁНЫЙ: флаг OFF — цепочка байт-в-байт; запись одна активная; касания "
           "утро·кружок·час·5 мин·«не смогла» ровно по разу; перезаписей не больше "
           f"{efir.LIMIT_PEREZAPISEY}; записанной цепочка не идёт; запись после 10:00 МСК — кружок сразу, без утра; "
-          f"«у тебя это» по поясу из встречи; сеансы "
+          f"«у тебя это» по поясу из встречи; смена сеанса одним запросом; гонка двух нажатий — кружок один; «начинаем» "
+          f"по минуте, после конца — тишина; идущий сеанс — «заходи»; /efir_pogasit; сеансы "
           f"{'/'.join(f'{h}:00' for h in efir.CHASY_MSK)} МСК считаются от now.")
     return 0
 

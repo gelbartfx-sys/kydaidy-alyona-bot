@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS most_pisma (
 );
 
 -- Запись на эфир-воркшоп (efir.py, 13.09). seans — начало в UTC 'YYYY-MM-DD HH:MM'.
--- status: active → prishla | ne_prishla | perenos. Одна активная запись на
+-- status: active → prishla | ne_prishla | pogashena (смена сеанса — UPSERT той же строки). Одна активная запись на
 -- человека держится индексом, а не порядком вызовов — как бронь в vstrechi.
 CREATE TABLE IF NOT EXISTS efir_zapisi (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2455,22 +2455,44 @@ async def vstrecha_napomnil(vstrecha_id: int) -> None:
 # ── Эфир-воркшоп (efir.py, 13.09) ────────────────────────────────────────────
 
 async def efir_zapisat(tg_id: int, username: str | None, seans: str,
-                       istochnik: str | None, uzhe_otmecheno: tuple = ()) -> bool:
-    """Записать на сеанс. Прежняя активная запись уходит в 'perenos' — у человека
-    одна активная запись. uzhe_otmecheno — касания, чьё время прошло к моменту
-    записи (утро в день эфира после 10:00): их не шлём задним числом."""
-    await _exec("UPDATE efir_zapisi SET status = 'perenos' "
-                "WHERE tg_id = ? AND status = 'active'", (tg_id,))
-    kolonki = "".join(f", napomnil_{k}" for k in uzhe_otmecheno)
-    znacheniya = ", CURRENT_TIMESTAMP" * len(uzhe_otmecheno)
+                       istochnik: str | None, uzhe_otmecheno: tuple = ()) -> str | bool:
+    """Записать на сеанс ОДНИМ запросом: UPSERT по частичному индексу «одна активная».
+
+    Нет активной — вставка. Есть активная на другой сеанс — она же переписывается на
+    новый (окна «старая снята, новая не записана» нет). Есть на тот же — no-op: отметки
+    касаний не сбрасываются, двойное нажатие даёт успех оба раза.
+    uzhe_otmecheno — касания, чьё время прошло к моменту записи: их не шлём задним числом.
+    Возврат: 'nova' — вставлена/сменена, 'uzhe' — уже была на этот сеанс,
+    False — только если запрос упал. SQLite ≥3.35 / D1 (RETURNING)."""
+    utro = "CURRENT_TIMESTAMP" if "utro" in uzhe_otmecheno else "NULL"
+    chas = "CURRENT_TIMESTAMP" if "chas" in uzhe_otmecheno else "NULL"
     try:
-        await _exec(
-            f"INSERT INTO efir_zapisi (tg_id, username, seans, istochnik{kolonki}) "
-            f"VALUES (?, ?, ?, ?{znacheniya})", (tg_id, username, seans, istochnik))
+        row = await _exec(
+            "INSERT INTO efir_zapisi (tg_id, username, seans, istochnik, status, "
+            "napomnil_utro, napomnil_chas) "
+            f"VALUES (?, ?, ?, ?, 'active', {utro}, {chas}) "
+            "ON CONFLICT(tg_id) WHERE status = 'active' DO UPDATE SET "
+            "seans = excluded.seans, username = excluded.username, "
+            "istochnik = excluded.istochnik, napomnil_utro = excluded.napomnil_utro, "
+            "napomnil_chas = excluded.napomnil_chas, napomnil_5min = NULL, "
+            "napomnil_posle = NULL, created_at = CURRENT_TIMESTAMP "
+            "WHERE efir_zapisi.seans != excluded.seans RETURNING id",
+            (tg_id, username, seans, istochnik), fetch="one")
     except Exception:
         logger.warning("efir_zapisat failed", exc_info=True)
         return False
-    return True
+    # RETURNING отдаёт строку только если она вставлена или сменила сеанс; no-op
+    # (тот же сеанс — второе из двух одновременных нажатий) — пусто. По этому
+    # и решается, слать ли кружок: из двух гонящихся нажатий «nova» получит одно.
+    return "nova" if row else "uzhe"
+
+
+async def efir_pogasit_proshedshie(do: str) -> int:
+    """Погасить активные записи на сеансы, начавшиеся раньше `do` (UTC-ключ), без
+    касаний: статус 'pogashena' не считается пропуском и «не смогла» не вызывает."""
+    rows = await _exec("UPDATE efir_zapisi SET status = 'pogashena' "
+                       "WHERE status = 'active' AND seans < ? RETURNING id", (do,), fetch="all")
+    return len(rows or [])
 
 
 async def efir_moya(tg_id: int):

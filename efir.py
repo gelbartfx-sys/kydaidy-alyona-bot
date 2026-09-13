@@ -18,6 +18,15 @@
     самое позднее наступившее, более ранние гасятся вместе с ним.
 
 Тексты — блоком ниже, константами: их правят Кай и Алёна, не трогая логику.
+
+ПОРЯДОК ВКЛЮЧЕНИЯ (флаг EFIR_ENABLED):
+  1. Код выкачен с флагом OFF — бот прежний, proverka.sh зелёный.
+  2. Кай или Алёна шлёт боту /efir_pogasit — активные записи на уже прошедшие
+     сеансы (остались от прошлого включения) гасятся БЕЗ «не смогла»; бот отвечает
+     числом. Команда работает и при выключенном флаге — ради неё она и есть.
+  3. По желанию: EFIR_KOMNATA_URL в env и file_id кружка в bot_meta 'efir_krujok_utro'.
+  4. EFIR_ENABLED=1 в env Render → рестарт (не при непустой очереди задач).
+  5. Проверка боем: /efir у админа — выбор из двух ближайших сеансов.
 """
 from __future__ import annotations
 
@@ -29,14 +38,17 @@ from aiogram.filters import Command
 from aiogram.types import (CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message)
 
-from config import settings
-from database import (efir_aktivnye, vstrecha_poyas, efir_moya, efir_otmetit, efir_prishla_sobytie,
+from config import ADMIN_IDS, settings
+from database import (efir_aktivnye, efir_pogasit_proshedshie, vstrecha_poyas, efir_moya, efir_otmetit, efir_prishla_sobytie,
                       efir_propuskov, efir_status, efir_zapisat, get_meta, log_event)
-from vstrecha import MSK_SDVIG, iz_klyucha, klyuch, mestnoe, po_russki
+from vstrecha import MSK_SDVIG, iz_klyucha, klyuch, mestnoe, minut, po_russki
 
 logger = logging.getLogger(__name__)
 
 efir_router = Router()
+# Админская дверь — отдельным роутером, подключённым всегда: /efir_pogasit нужен ДО
+# включения флага. Фильтр по ADMIN_IDS: чужой /efir_pogasit уходит, куда уходил.
+efir_admin_router = Router()
 
 # ── Расписание ───────────────────────────────────────────────────────────────
 CHASY_MSK = (12, 20)          # сеансы каждый день, часы по Москве — ОДНО место
@@ -44,7 +56,6 @@ DLINA_MIN = 50                # сколько идёт эфир
 UTRO_MSK = time(10, 0)        # прогрев в день эфира
 CHAS_MIN = 60                 # «за час»
 PYAT_MIN = 5                  # «начинаем»
-OPOZDANIE_MIN = 15            # «начинаем» ещё уходит, если тик опоздал к старту
 POSLE_MIN = 60                # «не смогла» — через час после конца
 LIMIT_PEREZAPISEY = 3         # сколько раз зовём перезаписаться после пропуска
 VPERYOD_DNEY = 3              # на сколько дней вперёд принимается кнопка сеанса
@@ -72,7 +83,14 @@ EFIR_CHAS = (
     "Найди пятьдесят минут, когда тебя никто не будет дёргать.")
 # Присутствие — через живой чат эфира, без утверждений, что Алёна в эфире вживую
 # (решение Кая 13.09: «на грани, без прямой лжи»).
-EFIR_5MIN = "Начинаем через пять минут. Заходи — в чате эфира я отвечу на твои вопросы."
+# Текст «начинаем» — по факту минуты отправки (тик мог опоздать); после конца не шлётся.
+EFIR_5MIN_DO = "Начинаем через {cherez}. Заходи — в чате эфира тебе ответят на вопросы."
+EFIR_5MIN_SEYCHAS = "Начинаем прямо сейчас. Заходи — в чате эфира тебе ответят на вопросы."
+EFIR_5MIN_POSLE = ("Начали {nazad} назад — заходи, эфир ещё идёт. "
+                   "В чате эфира тебе ответят на вопросы.")
+EFIR_IDET = ("Этот эфир идёт прямо сейчас — заходи, ещё успеваешь.\n\n"
+             "Или выбери следующий:")
+EFIR_POGASIL = "Погасила записей на прошедшие сеансы: {n}. Теперь можно включать эфир."
 EFIR_NE_SMOGLA = (
     "Вижу, сегодня не получилось прийти — так бывает.\n\n"
     "Следующий эфир — {kogda} по Москве{u_tebya}. Записать тебя?")
@@ -129,6 +147,20 @@ def posledniy(now: datetime) -> datetime:
     return [t for t in _seansy_s(now) if t <= now][-1]
 
 
+def idet(seans: datetime, now: datetime) -> bool:
+    """Сеанс уже начался и ещё не кончился."""
+    return seans <= now < seans + timedelta(minutes=DLINA_MIN)
+
+
+def tekst_nachinaem(seans: datetime, now: datetime) -> str:
+    """«Начинаем через N минут» / «начали N минут назад» — по минуте отправки."""
+    m = int((seans - now).total_seconds() // 60)
+    if m > 0:
+        return EFIR_5MIN_DO.format(cherez=minut(m))
+    nazad = int((now - seans).total_seconds() // 60)
+    return EFIR_5MIN_SEYCHAS if nazad < 1 else EFIR_5MIN_POSLE.format(nazad=minut(nazad))
+
+
 def v_raspisanii(utc: datetime) -> bool:
     m = _msk(utc)
     return m.hour in CHASY_MSK and m.minute == 0
@@ -172,7 +204,7 @@ def kasanie(seans: datetime, now: datetime) -> str:
     m = (seans - now).total_seconds() / 60
     if now >= seans + timedelta(minutes=DLINA_MIN + POSLE_MIN):
         return "posle"
-    if -OPOZDANIE_MIN < m <= PYAT_MIN:
+    if -DLINA_MIN < m <= PYAT_MIN:              # до конца сеанса, после — не шлём
         return "5min"
     if PYAT_MIN < m <= CHAS_MIN:
         return "chas"
@@ -253,6 +285,18 @@ async def zapisat(msg: Message, user, seans: datetime, source: str) -> bool:
     """Записать на сеанс и подтвердить сразу. Сеанс вне расписания или прошедший —
     отказ с выбором ближайших: кнопка живёт в чате сколько угодно."""
     now = seychas()
+    if v_raspisanii(seans) and idet(seans, now):
+        # Идущий сеанс не записываем — зовём сразу и предлагаем следующие.
+        kbd = _kbd_vybor(now)
+        komnata = _kbd_komnata()
+        if komnata:
+            kbd = InlineKeyboardMarkup(inline_keyboard=komnata.inline_keyboard + kbd.inline_keyboard)
+        await msg.answer(EFIR_IDET, parse_mode=None, reply_markup=kbd)
+        try:
+            await log_event(user.id, "efir_idet", klyuch(seans))
+        except Exception:
+            logger.debug("log_event efir_idet failed", exc_info=True)
+        return False
     if not v_raspisanii(seans) or seans <= now or seans > now + timedelta(days=VPERYOD_DNEY):
         await msg.answer(EFIR_PROSHEL, parse_mode=None, reply_markup=_kbd_vybor(now))
         return False
@@ -266,12 +310,14 @@ async def zapisat(msg: Message, user, seans: datetime, source: str) -> bool:
     # Кружок утра этого дня уже получен по прежней записи (смена 12:00 ↔ 20:00) — не дублируем.
     krujok_uzhe = bool(moya and moya.get("napomnil_utro")
                        and _msk(iz_klyucha(moya["seans"])).date() == _msk(seans).date())
-    if not await efir_zapisat(user.id, getattr(user, "username", None), klyuch(seans),
-                              source or None, proshedshie(seans, now)):
+    rezultat = await efir_zapisat(user.id, getattr(user, "username", None), klyuch(seans),
+                                  source or None, proshedshie(seans, now))
+    if not rezultat:
         await msg.answer(EFIR_NE_ZAPISALA, parse_mode=None, reply_markup=kbd_zapis())
         return False
     await msg.answer(podtverdit, parse_mode=None, reply_markup=kbd_zapis(BTN_DRUGOE))
-    if pozdnyaya(seans, now) and not krujok_uzhe:
+    # rezultat == 'uzhe': параллельное нажатие уже записало этот сеанс и шлёт кружок само.
+    if pozdnyaya(seans, now) and not krujok_uzhe and rezultat == "nova":
         # Утреннее касание уже помечено отправленным (proshedshie) — кружок идёт сейчас.
         krujok = (await get_meta(META_KRUJOK_UTRO) or "").strip()
         if krujok:
@@ -311,6 +357,20 @@ async def cb_efir(cb: CallbackQuery):
             return
         await zapisat(cb.message, cb.from_user, seans,
                       "perezapis" if chasti[1] == "p" else "knopka")
+
+
+async def pogasit_proshedshie(now: datetime | None = None) -> int:
+    """Шаг включения: погасить записи на уже закончившиеся сеансы без касаний."""
+    now = now or seychas()
+    return await efir_pogasit_proshedshie(klyuch(now - timedelta(minutes=DLINA_MIN)))
+
+
+@efir_admin_router.message(Command("efir_pogasit"), F.from_user.id.in_(ADMIN_IDS))
+async def cmd_efir_pogasit(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:      # фильтр выше; дубль — для прямого вызова
+        return
+    n = await pogasit_proshedshie()
+    await msg.answer(EFIR_POGASIL.format(n=n), parse_mode=None)
 
 
 # ── Пришла: заглушка до комнаты ──────────────────────────────────────────────
@@ -396,7 +456,7 @@ async def _obrabotat(bot: Bot, row: dict, now: datetime) -> None:
     elif k == "chas":
         await _poslat(bot, tg_id, EFIR_CHAS.format(vremya=vremya, u_tebya=ut))
     else:
-        await _poslat(bot, tg_id, EFIR_5MIN, _kbd_komnata())
+        await _poslat(bot, tg_id, tekst_nachinaem(seans, now), _kbd_komnata())
     await log_event(tg_id, "efir_napominanie", f"{row['seans']}|{k}")
 
 

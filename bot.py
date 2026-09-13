@@ -162,7 +162,8 @@ async def main():
     dp.include_router(vstrecha_router)
     # Эфир-воркшоп (13.09): /efir и кнопки efir:*. Только при включённом флаге —
     # выключенным /efir уходит туда же, куда уходил до эфира.
-    from efir import efir_router, run_efir_tick
+    from efir import efir_admin_router, efir_router, run_efir_tick
+    dp.include_router(efir_admin_router)   # /efir_pogasit — шаг перед включением флага
     if settings.efir_enabled:
         dp.include_router(efir_router)
     dp.include_router(router)
