@@ -28,7 +28,7 @@ udalit_router = Router()
 
 # Порядок: сначала зависимые (отметки, сессии), users — последним.
 TABLICY = (
-    "dnevnik_otmetki", "dnevnik", "razbor_zayavki", "vstrechi", "efir_zapisi",
+    "dnevnik_otmetki", "dnevnik", "razbor_zayavki", "statusy", "vstrechi", "efir_zapisi",
     "soglasiya", "para_quiz", "atm_quiz", "sixsec", "checkin_ledger", "checkin_pause",
     "ai_messages", "ai_sessions", "manifest7_guide", "shadow_generations",
     "growth_drafts", "followups", "messages_log", "funnel_events", "users",

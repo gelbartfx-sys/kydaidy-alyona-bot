@@ -2,10 +2,18 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Мост Кай ↔ Алёна",
-    "description": "Почтовый ящик между командой Кая и ChatGPT Алёны: забрать новые письма от Кая и отправить ответ Алёны.",
-    "version": "1.0.0"
+    "description": "Почтовый ящик между командой Кая и ChatGPT Алёны, плюс расписание встреч и сводка. В ответах НЕТ имён, @username, id и текстов людей — только числа, время и номера встреч. Кто стоит за номером — в карточке, которую бот присылает Алёне в Телеграм. Всё, что меняет данные, вызывать только после явного «да» Алёны и с podtverzhdeno: true.",
+    "version": "1.1.0"
   },
   "servers": [{ "url": "https://kydaidy-bot.onrender.com" }],
+  "components": {
+    "schemas": {
+      "Oshibka": {
+        "type": "object",
+        "properties": { "error": { "type": "string", "description": "Причина по-русски — перескажи её Алёне" } }
+      }
+    }
+  },
   "paths": {
     "/most/novoe": {
       "get": {
@@ -62,6 +70,184 @@
         "responses": {
           "200": { "description": "Ответ доставлен" },
           "400": { "description": "Пустой или слишком длинный текст" }
+        }
+      }
+    },
+    "/most/svodka": {
+      "get": {
+        "operationId": "pokazatSvodku",
+        "summary": "Сводка воронки за N дней — только числа, без людей",
+        "parameters": [{
+          "name": "dney", "in": "query", "required": false,
+          "schema": { "type": "integer", "default": 7, "minimum": 1, "maximum": 90 },
+          "description": "За сколько последних дней считать"
+        }],
+        "responses": {
+          "200": {
+            "description": "Числа. null — не посчиталось (сбой), это не ноль.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dney": { "type": "integer" },
+                    "novye": { "type": ["integer", "null"], "description": "Новых людей в боте" },
+                    "test1": { "type": ["integer", "null"], "description": "Прошли тест 1 (тип пары)" },
+                    "test2": { "type": ["integer", "null"], "description": "Прошли тест 2 (роль в цикле)" },
+                    "efir_zapisany": { "type": ["integer", "null"], "description": "Записались на эфир" },
+                    "dnevnik_nachali": { "type": ["integer", "null"], "description": "Начали дневник" },
+                    "dnevnik_zakonchili": { "type": ["integer", "null"], "description": "Закончили неделю дневника" },
+                    "zayavki": { "type": ["integer", "null"], "description": "Заявок на разбор" },
+                    "vstrechi_na_nedelyu": { "type": ["integer", "null"], "description": "Действующих встреч на ближайшие 7 дней" },
+                    "statusy": {
+                      "type": ["object", "null"],
+                      "description": "Итоги встреч, отмеченные за период (последний итог каждой встречи): byl — был, ne_prishel — не пришёл, dumaet — думает, klient — клиент",
+                      "properties": {
+                        "byl": { "type": "integer" }, "ne_prishel": { "type": "integer" },
+                        "dumaet": { "type": "integer" }, "klient": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/most/raspisanie": {
+      "get": {
+        "operationId": "pokazatRaspisanie",
+        "summary": "Окна приёма и встречи: от 3 дней назад до 14 дней вперёд. Имён нет — только номер встречи; кто это, Алёна видит в карточке в Телеграме",
+        "responses": {
+          "200": {
+            "description": "Расписание",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "okna_msk": { "type": "string", "description": "Окна приёма по Москве, строками «пн 10:00–14:00»" },
+                    "vstrechi": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "nomer": { "type": "integer", "description": "Номер встречи — его называет Алёна («встреча №7»)" },
+                          "vremya_msk": { "type": "string", "description": "Начало по Москве, ГГГГ-ММ-ДД ЧЧ:ММ; встреча 20 минут" },
+                          "status": { "type": "string", "enum": ["zapisana", "otmenena"] },
+                          "itog": { "type": ["string", "null"], "enum": ["byl", "ne_prishel", "dumaet", "klient", null], "description": "Последний отмеченный итог" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/most/okna": {
+      "post": {
+        "operationId": "zadatOkna",
+        "summary": "Задать окна приёма. Только после явного «да» Алёны",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["tekst", "podtverzhdeno"],
+                "properties": {
+                  "tekst": { "type": "string", "description": "По Москве. Формат: «пн-пт 10:00-14:00», несколько строк через «;»: «пн,ср 10:00-13:00; сб 11:00-14:00». Заменяет расписание целиком" },
+                  "podtverzhdeno": { "type": "boolean", "description": "true — только если Алёна прямо сказала «да» на этот вариант" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Сохранено; okna_msk — как теперь" },
+          "400": { "description": "Нет подтверждения или формат не разобран — ничего не изменено", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Oshibka" } } } }
+        }
+      }
+    },
+    "/most/vstrecha/otmena": {
+      "post": {
+        "operationId": "otmenitVstrechu",
+        "summary": "Отменить встречу по номеру. Только после явного «да» Алёны. Человеку бот напишет от лица Алёны и предложит другое время",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["nomer", "podtverzhdeno"],
+                "properties": {
+                  "nomer": { "type": "integer", "description": "Номер встречи из расписания" },
+                  "prichina": { "type": "string", "maxLength": 200, "description": "Необязательно. Что написать человеку о причине — словами Алёны, коротко, одной строкой, до 200 знаков. Без данных клиента, без ссылок, @упоминаний, телефонов и почты. Бот вставит так: «Мне придётся отменить нашу встречу … — {prichina}. Прости. Выбери другое время…». Пусто — без причины" },
+                  "podtverzhdeno": { "type": "boolean", "description": "true — только после явного «да» Алёны на итоговый текст" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Отменено, человек и Кай уведомлены. Причина в ответе не возвращается" },
+          "400": { "description": "Нет подтверждения, такой действующей встречи нет, причина длиннее 200 знаков или в ней ссылка/контакт — ничего не изменено", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Oshibka" } } } }
+        }
+      }
+    },
+    "/most/vstrecha/perenos": {
+      "post": {
+        "operationId": "perenestiVstrechu",
+        "summary": "Перенести встречу на другое время (номер сохраняется). Только после явного «да» Алёны. Человеку бот напишет от лица Алёны",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["nomer", "vremya_msk", "podtverzhdeno"],
+                "properties": {
+                  "nomer": { "type": "integer" },
+                  "vremya_msk": { "type": "string", "description": "Новое начало по Москве, ГГГГ-ММ-ДД ЧЧ:ММ. Только внутри окон, по сетке :00/:30, не раньше чем через 2 часа и не дальше 14 дней" },
+                  "podtverzhdeno": { "type": "boolean", "description": "true — только после явного «да» Алёны" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Перенесено, человек и Кай уведомлены" },
+          "400": { "description": "Нет подтверждения, время занято, в прошлом или вне окон — ничего не изменено", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Oshibka" } } } }
+        }
+      }
+    },
+    "/most/status": {
+      "post": {
+        "operationId": "otmetitItog",
+        "summary": "Отметить итог встречи (пишется в историю, прошлые отметки остаются). Только после явного «да» Алёны",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["nomer", "status", "podtverzhdeno"],
+                "properties": {
+                  "nomer": { "type": "integer" },
+                  "status": { "type": "string", "enum": ["byl", "ne_prishel", "dumaet", "klient"], "description": "byl — был, ne_prishel — не пришёл, dumaet — думает, klient — стал клиентом" },
+                  "podtverzhdeno": { "type": "boolean", "description": "true — только после явного «да» Алёны" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Записано" },
+          "400": { "description": "Нет подтверждения, неизвестный статус или нет встречи — ничего не изменено", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Oshibka" } } } }
         }
       }
     }

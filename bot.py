@@ -163,6 +163,9 @@ async def main():
     # выбора времени. Только callback'и vst:* и две команды — конфликтов нет.
     from vstrecha import vstrecha_router
     dp.include_router(vstrecha_router)
+    # Карточка человека перед встречей (14.09): /karta и кнопки итога kst:*.
+    from karta import karta_router, run_karta_tick
+    dp.include_router(karta_router)
     # Эфир-воркшоп (13.09): /efir и кнопки efir:*. Только при включённом флаге —
     # выключенным /efir уходит туда же, куда уходил до эфира.
     from efir import efir_admin_router, efir_router, run_efir_tick
@@ -205,6 +208,8 @@ async def main():
     # опаздывает на разницу, как сторож с шагом опроса больше порога.
     from vstrecha import run_vstrecha_tick
     scheduler.add_job(run_vstrecha_tick, "interval", minutes=10, args=[bot])
+    # Карточка Алёне за сутки до встречи — тот же шаг, антидубль отметкой в базе.
+    scheduler.add_job(run_karta_tick, "interval", minutes=10, args=[bot])
     # Касания эфира: утро, за час, за пять минут, «не смогла». Шаг пять минут —
     # иначе «начинаем» опаздывает на разницу. Тик сам молчит при выключенном флаге.
     if settings.efir_enabled:

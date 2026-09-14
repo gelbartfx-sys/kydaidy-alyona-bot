@@ -310,6 +310,25 @@ CREATE TABLE IF NOT EXISTS efir_zapisi (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS efir_odna_aktivnaya
     ON efir_zapisi(tg_id) WHERE status = 'active';
+
+-- Итог встречи (14.09): история, а не одно поле — «думает» через неделю становится
+-- «клиент», и видно обе отметки. tg_id внутри, наружу (GPT Алёны) не отдаётся.
+CREATE TABLE IF NOT EXISTS statusy (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vstrecha_id INTEGER NOT NULL,
+    tg_id INTEGER,
+    status TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Карточка человека ушла Алёне (karta.py). Ключ — встреча И её время: перенос
+-- даёт новую карточку, повтор тика на то же время — нет (антидубль базой).
+CREATE TABLE IF NOT EXISTS karty_ushli (
+    vstrecha_id INTEGER NOT NULL,
+    nachalo TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vstrecha_id, nachalo)
+);
 """
 
 
@@ -680,6 +699,20 @@ _RUNTIME_MIGRATIONS = (
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS efir_odna_aktivnaya
     ON efir_zapisi(tg_id) WHERE status = 'active'""",
+    # Итог встречи и антидубль карточки (14.09), см. комментарии в SCHEMA.
+    """CREATE TABLE IF NOT EXISTS statusy (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vstrecha_id INTEGER NOT NULL,
+        tg_id INTEGER,
+        status TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS karty_ushli (
+        vstrecha_id INTEGER NOT NULL,
+        nachalo TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (vstrecha_id, nachalo)
+    )""",
 )
 
 
@@ -2456,12 +2489,93 @@ async def vstrecha_otmenit(tg_id: int):
     row = await vstrecha_moya(tg_id)
     if not row:
         return None
+    return await vstrecha_snyat(int(row["id"]))
+
+
+async def vstrecha_snyat(vstrecha_id: int):
+    """Снять действующую бронь по номеру → снятая строка или None (не было такой
+    действующей). Общее место для отмены человеком и отмены Алёной."""
     try:
+        row = await _exec("SELECT * FROM vstrechi WHERE id = ? AND status = 'booked'",
+                          (int(vstrecha_id),), fetch="one")
+        if not row:
+            return None
         await _exec("UPDATE vstrechi SET status = 'otmenena' WHERE id = ?", (row["id"],))
         return row
     except Exception:
-        logger.warning("vstrecha_otmenit failed (continuing)", exc_info=True)
+        logger.warning("vstrecha_snyat failed (continuing)", exc_info=True)
         return None
+
+
+async def vstrecha_po_id(vstrecha_id: int):
+    try:
+        return await _exec("SELECT * FROM vstrechi WHERE id = ?", (int(vstrecha_id),),
+                           fetch="one")
+    except Exception:
+        logger.warning("vstrecha_po_id failed (continuing)", exc_info=True)
+        return None
+
+
+async def vstrecha_perenesti(vstrecha_id: int, nachalo: str) -> str:
+    """Сдвинуть действующую бронь на другое время ТОЙ ЖЕ строкой (номер встречи
+    не меняется). Занятость держит тот же индекс vstrechi_slot_zanyat: UPDATE
+    в занятый слот падает в базе, а не проверяется «до» в коде.
+    'ok' | 'zanyato' | 'net' (нет такой действующей брони)."""
+    try:
+        row = await _exec(
+            "UPDATE vstrechi SET nachalo = ?, napomnil_at = NULL "
+            "WHERE id = ? AND status = 'booked' RETURNING id",
+            (nachalo, int(vstrecha_id)), fetch="one")
+    except Exception:
+        vladelec = await _exec(
+            "SELECT id FROM vstrechi WHERE nachalo = ? AND status = 'booked'",
+            (nachalo,), fetch="one")
+        if vladelec and int(vladelec["id"]) != int(vstrecha_id):
+            return "zanyato"
+        raise
+    return "ok" if row else "net"
+
+
+async def vstrechi_v_okne(ot: str, do: str):
+    """Встречи с началом в [ot, do] — только номер, время, статус и последний итог.
+    Ни tg_id, ни username здесь не выбираются: это выборка для GPT Алёны."""
+    return await _exec(
+        "SELECT v.id, v.nachalo, v.status, "
+        "(SELECT s.status FROM statusy s WHERE s.vstrecha_id = v.id "
+        " ORDER BY s.id DESC LIMIT 1) AS itog "
+        "FROM vstrechi v WHERE v.nachalo >= ? AND v.nachalo <= ? "
+        "ORDER BY v.nachalo LIMIT 200", (ot, do), fetch="all") or []
+
+
+# Итог встречи (14.09). Проверка значения — здесь, на границе записи: и кнопка
+# под карточкой, и ручка GPT идут через эту функцию.
+STATUSY = ("byl", "ne_prishel", "dumaet", "klient")
+
+
+async def status_zapisat(vstrecha_id: int, status: str) -> bool:
+    """Добавить итог в историю. False — нет такой встречи. tg_id берётся из брони."""
+    if status not in STATUSY:
+        raise ValueError(f"статус один из: {', '.join(STATUSY)}")
+    row = await vstrecha_po_id(vstrecha_id)
+    if not row:
+        return False
+    await _exec("INSERT INTO statusy (vstrecha_id, tg_id, status) VALUES (?, ?, ?)",
+                (int(vstrecha_id), row["tg_id"], status))
+    return True
+
+
+async def statusy_vstrechi(vstrecha_id: int):
+    return await _exec("SELECT status, created_at FROM statusy WHERE vstrecha_id = ? "
+                       "ORDER BY id", (int(vstrecha_id),), fetch="all") or []
+
+
+async def karta_zanyat(vstrecha_id: int, nachalo: str) -> bool:
+    """Отметка «карточка ушла» ДО отправки. True — эта отметка наша (слать),
+    False — уже была. Решает вставка по первичному ключу, а не чтение перед ней."""
+    row = await _exec("INSERT OR IGNORE INTO karty_ushli (vstrecha_id, nachalo) "
+                      "VALUES (?, ?) RETURNING vstrecha_id",
+                      (int(vstrecha_id), nachalo), fetch="one")
+    return bool(row)
 
 
 async def vstrecha_napomnit_due(ot: str, do: str):

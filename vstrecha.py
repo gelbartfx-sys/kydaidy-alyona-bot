@@ -39,7 +39,8 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton,
 from config import ADMIN_IDS, settings
 from database import (dnevnik_get, get_meta, log_event, razbor_get, set_meta,
                       vstrecha_moya, vstrecha_napomnil, vstrecha_napomnit_due,
-                      vstrecha_otmenit, vstrecha_vladelec,
+                      vstrecha_otmenit, vstrecha_perenesti, vstrecha_po_id,
+                      vstrecha_snyat, vstrecha_vladelec,
                       vstrecha_zabronirovat, vstrecha_zanyatye)
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,16 @@ def razobrat_okna(text: str) -> list[tuple[int, int, int]]:
 def okna_tekstom(okna: list[tuple[int, int, int]]) -> str:
     return "\n".join(f"{DNI[d]} {n // 60:02d}:{n % 60:02d}–{k // 60:02d}:{k % 60:02d}"
                      for d, n, k in okna)
+
+
+async def sohranit_okna(tekst: str) -> list[tuple[int, int, int]]:
+    """Разобрать и сохранить окна. ValueError — НЕ сохранено, с причиной.
+    Общее место для /okna и ручки GPT Алёны: правило формата одно."""
+    novye = razobrat_okna(tekst)
+    await set_meta(META_OKNA, tekst.strip())
+    if await okna_seychas() != novye:
+        raise ValueError("база вернула другое расписание, попробуй ещё раз")
+    return novye
 
 
 async def okna_seychas() -> list[tuple[int, int, int]]:
@@ -406,16 +417,10 @@ async def cmd_okna(msg: Message, command: CommandObject):
             parse_mode=None)
         return
     try:
-        novye = razobrat_okna(command.args)
+        novye = await sohranit_okna(command.args)
     except ValueError as e:
         await msg.answer(f"Не сохранила — {e}.\n\nФормат: пн-пт 10:00-14:00",
                          parse_mode=None)
-        return
-    await set_meta(META_OKNA, command.args.strip())
-    proverka = await okna_seychas()
-    if proverka != novye:
-        await msg.answer("Не сохранила: база вернула другое расписание. "
-                         "Попробуй ещё раз.", parse_mode=None)
         return
     await msg.answer("Окна приёма обновлены (по Москве):\n" + okna_tekstom(novye) +
                      f"\n\nСвободных слотов на {GORIZONT_DNEY} дней: "
@@ -546,6 +551,95 @@ async def _obeim_storonam(bot: Bot, tg_id: int, username: str | None,
             await bot.send_message(admin_id, tekst, parse_mode=None)
         except Exception:
             logger.warning("vstrecha notify failed for %s", admin_id, exc_info=True)
+
+
+# ── Отмена и перенос со стороны Алёны (через её GPT, 14.09) ───────────────────
+# Человеку пишет бот голосом Алёны («я»), Каю и Алёне — тем же _obeim_storonam,
+# что при отмене/переносе самим человеком. Возврат: None — сделано, строка — отказ.
+
+async def _cheloveku(bot: Bot, tg_id: int, tekst: str, kbd=None) -> None:
+    try:
+        await bot.send_message(int(tg_id), tekst, parse_mode=None, reply_markup=kbd)
+    except Exception:
+        logger.warning("vstrecha: человеку %s не ушло", tg_id, exc_info=True)
+
+
+PRICHINA_MAX = 200
+# Причина от Алёны уходит человеку от её имени: ни ссылок, ни контактов (решение Кая 14.09).
+# Телефон — от 7 цифр подряд через пробелы/скобки/дефисы; точки и двоеточия не в счёт,
+# чтобы «14.09.2026» и «12:00» не считались телефоном.
+_PRICHINA_ZAPRET = re.compile(
+    r"https?://|www\.|t\.me|@|"
+    r"\b[\w-]+\.(?:ru|com|net|org|me|io|su|info|app|ly|link|site|online|рф)\b|"
+    r"\+?\d(?:[\s()\-]*\d){6,}", re.IGNORECASE)
+
+
+def ochistit_prichinu(syroe) -> str:
+    """Причина отмены для человека: пусто → ""; иначе одна строка ≤ PRICHINA_MAX.
+    ValueError — с текстом для Алёны; тогда ничего не отменяется."""
+    p = " ".join(str(syroe or "").split())      # переносы и лишние пробелы → один пробел
+    if len(p) > PRICHINA_MAX:
+        raise ValueError(f"причина длиннее {PRICHINA_MAX} знаков — сократи")
+    if _PRICHINA_ZAPRET.search(p):
+        raise ValueError("в причине не должно быть ссылок и контактов")
+    return p.rstrip(" .")
+
+
+async def otmenit_alyonoy(bot: Bot, nomer: int, prichina="") -> str | None:
+    try:
+        prichina = ochistit_prichinu(prichina)  # до снятия брони: отказ ничего не трогает
+    except ValueError as e:
+        return str(e)
+    snyataya = await vstrecha_snyat(nomer)
+    if not snyataya:
+        return f"действующей встречи №{nomer} нет"
+    utc, tz = iz_klyucha(snyataya["nachalo"]), snyataya["tz_min"]
+    kogda = f"Мне придётся отменить нашу встречу {po_russki(utc, tz)} по твоему времени"
+    await _cheloveku(
+        bot, snyataya["tg_id"],
+        (f"{kogda} — {prichina}. Прости." if prichina else f"{kogda} — прости.")
+        + " Выбери другое время, когда тебе удобно:",
+        kbd_zapis("Выбрать другое время"))
+    # Причина — Каю и Алёне в Телеграм, но не в базу и не в ответ ручки (уходит в OpenAI).
+    await _obeim_storonam(bot, snyataya["tg_id"], snyataya.get("username"), utc, tz,
+                          f"№{nomer} отменена Алёной (через GPT)"
+                          + (f", причина: {prichina}" if prichina else ""))
+    await log_event(int(snyataya["tg_id"]), "vstrecha_otmena_alyona", str(nomer))
+    return None
+
+
+async def perenesti_alyonoy(bot: Bot, nomer: int, vremya_msk: str) -> str | None:
+    """Время — по Москве 'YYYY-MM-DD HH:MM'. Пускаем только в слот, который увидел бы
+    человек при записи (окна, сетка, не прошлое и не ближе BUFER_MIN). Занятость
+    слота решает индекс базы, а не эта проверка."""
+    try:
+        msk = datetime.strptime(str(vremya_msk).strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return "время нужно в виде ГГГГ-ММ-ДД ЧЧ:ММ по Москве"
+    utc = msk - timedelta(minutes=MSK_SDVIG)
+    row = await vstrecha_po_id(nomer)
+    if not row or row["status"] != "booked":
+        return f"действующей встречи №{nomer} нет"
+    if str(row["nachalo"]) == klyuch(utc):
+        return None
+    if utc not in sloty(await okna_seychas(), datetime.utcnow()):
+        return ("это время в прошлом, ближе двух часов или вне окон приёма "
+                "(окна — в расписании)")
+    itog = await vstrecha_perenesti(nomer, klyuch(utc))
+    if itog == "zanyato":
+        return "это время уже занято другой встречей"
+    if itog != "ok":
+        return f"действующей встречи №{nomer} нет"
+    tz = row["tz_min"]
+    await _cheloveku(
+        bot, row["tg_id"],
+        f"Я перенесла нашу встречу на {po_russki(utc, tz)} по твоему времени. "
+        "Если так неудобно — нажми «Перенести» и выбери другое время.", _kbd_moya())
+    await _obeim_storonam(bot, row["tg_id"], row.get("username"), utc, tz,
+                          f"№{nomer} перенесена Алёной (через GPT), было "
+                          f"{po_russki(iz_klyucha(row['nachalo']), MSK_SDVIG)} МСК")
+    await log_event(int(row["tg_id"]), "vstrecha_perenos_alyona", str(nomer))
+    return None
 
 
 async def run_vstrecha_tick(bot: Bot) -> None:

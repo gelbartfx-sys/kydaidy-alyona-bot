@@ -21,6 +21,7 @@ shag "Прибор: запись на встречу (двойная бронь 
 shag "Прибор: мёртвая воронка не вернулась, живые пути на месте"  python3 proverka_voronki.py
 shag "Прибор: ключ слота дневника совпадает у бота и приложения"  python3 proverka_slota.py
 shag "Прибор: мост с GPT Алёны (ключи · круг письма · длина)"   python3 proverka_mosta.py
+shag "Прибор: ручки GPT Алёны и карточки (приватность · подтверждение · перенос · антидубль)" python3 proverka_admina.py
 shag "Прибор: эфир (флаг · запись · касания по разу · лимит 3 · от now)" python3 proverka_efira.py
 shag "Прибор: /udalit и согласие в пинках дневника" python3 proverka_udalit.py
 shag "Само-проверка: эфир"             python3 efir.py

@@ -14,6 +14,12 @@ Action (схема — `docs/most-openapi.json`):
 утечёт, им можно только читать письма Алёне и писать ответ — но не подкладывать ей письма
 от имени Кая. Нет ключа в env — ручки отвечают 503 (fail-closed), а не пускают всех.
 
+С 14.09 тот же ключ GPT открывает ручки расписания и сводки (svodka, raspisanie, okna,
+vstrecha/otmena, vstrecha/perenos, status). Правило приватности Кая: всё, что они отдают,
+уходит в OpenAI — поэтому только числа, время и номера встреч; кто человек — в карточке
+в Телеграме (karta.py). Изменяющие — только с "podtverzhdeno": true (явное «да» Алёны).
+Прибор — proverka_admina.py.
+
 Уведомления: новое письмо → Алёне в Телеграм «от Кая новое, открой GPT» (GPT первым не пишет);
 ответ → Каю в Телеграм с текстом. Сеть шлёт только обёртка в `setup_most`, логика —
 чистые функции над базой, их и проверяет `proverka_mosta.py`.
@@ -23,10 +29,12 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+from datetime import datetime, timedelta
 
 from aiohttp import web
 
 import database as db
+import vstrecha
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -146,7 +154,169 @@ def setup_most(app: web.Application, bot) -> None:
     async def otvety(request):
         return web.json_response({"pisma": await zabrat("ot_alyony", limit=50)})
 
+    # ── Ручки расписания и сводки для GPT Алёны (14.09) ────────────────────────
+    @_dveri("MOST_GPT_KEY")
+    async def h_svodka(request):
+        try:
+            dney = max(1, min(90, int(request.query.get("dney", "7"))))
+        except ValueError:
+            return web.json_response({"error": "dney — целое число дней"}, status=400)
+        return web.json_response(await svodka(dney))
+
+    @_dveri("MOST_GPT_KEY")
+    async def h_raspisanie(request):
+        return web.json_response(await raspisanie())
+
+    @_dveri("MOST_GPT_KEY")
+    async def h_okna(request):
+        d = await _telo(request)
+        if not podtverzhdeno_est(d):
+            return _NUZHNO_DA()
+        try:
+            novye = await vstrecha.sohranit_okna(str(d.get("tekst") or ""))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"ok": True, "okna_msk": vstrecha.okna_tekstom(novye)})
+
+    @_dveri("MOST_GPT_KEY")
+    async def h_otmena(request):
+        d = await _telo(request)
+        if not podtverzhdeno_est(d):
+            return _NUZHNO_DA()
+        nomer = _nomer(d)
+        oshibka = await vstrecha.otmenit_alyonoy(bot, nomer, d.get("prichina") or "")
+        if oshibka:
+            return web.json_response({"error": oshibka}, status=400)
+        return web.json_response({"ok": True, "nomer": nomer})
+
+    @_dveri("MOST_GPT_KEY")
+    async def h_perenos(request):
+        d = await _telo(request)
+        if not podtverzhdeno_est(d):
+            return _NUZHNO_DA()
+        nomer = _nomer(d)
+        oshibka = await vstrecha.perenesti_alyonoy(bot, nomer, str(d.get("vremya_msk") or ""))
+        if oshibka:
+            return web.json_response({"error": oshibka}, status=400)
+        return web.json_response({"ok": True, "nomer": nomer,
+                                  "vremya_msk": str(d.get("vremya_msk")).strip()})
+
+    @_dveri("MOST_GPT_KEY")
+    async def h_status(request):
+        d = await _telo(request)
+        if not podtverzhdeno_est(d):
+            return _NUZHNO_DA()
+        nomer = _nomer(d)
+        try:
+            ok = await db.status_zapisat(nomer, str(d.get("status") or ""))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if not ok:
+            return web.json_response({"error": f"встречи №{nomer} нет"}, status=400)
+        return web.json_response({"ok": True, "nomer": nomer, "status": d.get("status")})
+
     app.router.add_post("/most/alyone", k_alyone)
     app.router.add_get("/most/novoe", novoe)
     app.router.add_post("/most/otvet", otvet)
     app.router.add_get("/most/otvety", otvety)
+    app.router.add_get("/most/svodka", h_svodka)
+    app.router.add_get("/most/raspisanie", h_raspisanie)
+    app.router.add_post("/most/okna", h_okna)
+    app.router.add_post("/most/vstrecha/otmena", h_otmena)
+    app.router.add_post("/most/vstrecha/perenos", h_perenos)
+    app.router.add_post("/most/status", h_status)
+
+
+# ── Данные для GPT Алёны: только числа, время и внутренние номера ─────────────
+# Всё, что отдают функции ниже, уходит в OpenAI. Поэтому ни имён, ни username,
+# ни tg_id, ни текстов: не «вырезаем на выходе», а не выбираем из базы вовсе.
+# Кто за номером встречи — в карточке в Телеграме (karta.py).
+
+BRON = {"booked": "zapisana", "otmenena": "otmenena"}
+
+
+def podtverzhdeno_est(d: dict) -> bool:
+    """Изменение — только после явного «да» Алёны: GPT обязан прислать true.
+    Строка "true", 1 и прочее — не подтверждение."""
+    return d.get("podtverzhdeno") is True
+
+
+def _NUZHNO_DA():
+    return web.json_response(
+        {"error": "нужно подтверждение Алёны: спроси её и повтори с podtverzhdeno: true"},
+        status=400)
+
+
+def _nomer(d: dict) -> int:
+    n = d.get("nomer")
+    if isinstance(n, bool) or not isinstance(n, (int, str)):
+        raise web.HTTPBadRequest(text="nomer — номер встречи числом")
+    try:
+        return int(n)
+    except ValueError:
+        raise web.HTTPBadRequest(text="nomer — номер встречи числом")
+
+
+async def _chislo(sql: str, params: tuple = ()) -> int | None:
+    """None — не посчиталось (сбой базы), а не «ноль»: ноль GPT прочтёт как факт."""
+    try:
+        r = await db._exec(sql, params, fetch="one")
+        return int(r["n"]) if r else 0
+    except Exception:
+        logger.warning("most svodka: %s", sql, exc_info=True)
+        return None
+
+
+async def svodka(dney: int = 7) -> dict:
+    okno = (f"-{int(dney)} days",)
+    s = "datetime({}) >= datetime('now', ?)"
+    teper = datetime.utcnow()
+    statusy = {k: 0 for k in db.STATUSY}
+    try:
+        for r in await db._exec(
+                "SELECT status, COUNT(*) AS n FROM statusy t WHERE t.id = "
+                "(SELECT MAX(id) FROM statusy WHERE vstrecha_id = t.vstrecha_id) "
+                f"AND {s.format('created_at')} GROUP BY status", okno, fetch="all") or []:
+            statusy[str(r["status"])] = int(r["n"])
+    except Exception:
+        logger.warning("most svodka: statusy", exc_info=True)
+        statusy = None
+    return {
+        "dney": int(dney),
+        "novye": await _chislo(f"SELECT COUNT(*) AS n FROM users WHERE {s.format('created_at')}", okno),
+        "test1": await _chislo("SELECT COUNT(*) AS n FROM para_quiz WHERE dynamic IS NOT NULL "
+                               f"AND {s.format('created_at')}", okno),
+        "test2": await _chislo("SELECT COUNT(*) AS n FROM para_quiz WHERE strategy IS NOT NULL "
+                               f"AND {s.format('created_at')}", okno),
+        "efir_zapisany": await _chislo("SELECT COUNT(DISTINCT tg_id) AS n FROM efir_zapisi "
+                                       f"WHERE {s.format('created_at')}", okno),
+        "dnevnik_nachali": await _chislo(
+            f"SELECT COUNT(*) AS n FROM dnevnik WHERE {s.format('start_ts')}", okno),
+        "dnevnik_zakonchili": await _chislo(
+            "SELECT COUNT(*) AS n FROM dnevnik WHERE itog_sent = 1 "
+            f"AND {s.format('konec_ts')} AND datetime(konec_ts) <= datetime('now')", okno),
+        "zayavki": await _chislo(
+            f"SELECT COUNT(*) AS n FROM razbor_zayavki WHERE {s.format('created_at')}", okno),
+        "vstrechi_na_nedelyu": await _chislo(
+            "SELECT COUNT(*) AS n FROM vstrechi WHERE status = 'booked' "
+            "AND nachalo >= ? AND nachalo <= ?",
+            (vstrecha.klyuch(teper), vstrecha.klyuch(teper + timedelta(days=7)))),
+        "statusy": statusy,
+    }
+
+
+async def raspisanie() -> dict:
+    """Окна текстом + встречи от трёх дней назад (чтобы отметить итог) до горизонта записи."""
+    teper = datetime.utcnow()
+    rows = await db.vstrechi_v_okne(
+        vstrecha.klyuch(teper - timedelta(days=3)),
+        vstrecha.klyuch(teper + timedelta(days=vstrecha.GORIZONT_DNEY)))
+    return {
+        "okna_msk": vstrecha.okna_tekstom(await vstrecha.okna_seychas()),
+        "vstrechi": [{
+            "nomer": int(r["id"]),
+            "vremya_msk": f"{vstrecha.mestnoe(vstrecha.iz_klyucha(r['nachalo']), vstrecha.MSK_SDVIG):%Y-%m-%d %H:%M}",
+            "status": BRON.get(r["status"], r["status"]),
+            "itog": r.get("itog"),
+        } for r in rows],
+    }
