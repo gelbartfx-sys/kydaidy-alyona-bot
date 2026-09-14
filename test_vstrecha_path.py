@@ -28,6 +28,7 @@ for k in ("D1_PROXY_URL", "D1_PROXY_SECRET", "CF_ACCOUNT_ID"):
 import json                    # noqa: E402
 
 import database as db          # noqa: E402
+import dnevnik as dn           # noqa: E402
 import razbor as rz            # noqa: E402
 import vstrecha as v           # noqa: E402
 from config import ADMIN_IDS   # noqa: E402
@@ -110,7 +111,15 @@ async def _projti(pechatat: bool = False):
     tekst, knopki = msg.posledniy
     assert "после недели дневника" in tekst and "Начни дневник" in tekst, tekst
     assert not any(k and k.startswith("vst:tz:") for k in knopki), knopki
+    # Согласие перед дневником (14.09): условия и кнопка согласия, не сам дневник.
+    assert "dn:soglasie" in knopki and "Cloudflare" in tekst, msg.posledniy
     shag("Человек без дневника видит", tekst)
+
+    await dn.cb_soglasie(_Cb(bot, ch, "dn:soglasie"))
+    assert await db.soglasie_est(CHELOVEK)
+    await v.cmd_vstrecha(msg)
+    assert "dn:soglasie" not in msg.posledniy[1], msg.posledniy   # второй раз не спрашиваем
+    assert "Cloudflare" not in msg.posledniy[0]
 
     await db.dnevnik_start(CHELOVEK, 0, "solo", 2)          # неделя идёт
     await v.cmd_vstrecha(msg)

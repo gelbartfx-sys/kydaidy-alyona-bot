@@ -272,6 +272,15 @@ CREATE TABLE IF NOT EXISTS razbor_zayavki (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Согласия (14.09.2026): до дневника человек соглашается, что Алёна видит его
+-- ответы, а сервисы ИИ их обрабатывают. vid — на что именно ('dnevnik').
+CREATE TABLE IF NOT EXISTS soglasiya (
+    tg_id INTEGER NOT NULL,
+    vid TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tg_id, vid)
+);
+
 -- Мост с ChatGPT Алёны (most.py, 13.09.2026): письма в обе стороны.
 CREATE TABLE IF NOT EXISTS most_pisma (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -640,6 +649,12 @@ _RUNTIME_MIGRATIONS = (
     )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS vstrechi_slot_zanyat
         ON vstrechi(nachalo) WHERE status = 'booked'""",
+    """CREATE TABLE IF NOT EXISTS soglasiya (
+        tg_id INTEGER NOT NULL,
+        vid TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (tg_id, vid)
+    )""",
     """CREATE TABLE IF NOT EXISTS most_pisma (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         napravlenie TEXT NOT NULL,
@@ -2195,6 +2210,24 @@ async def razbor_count() -> int:
     except Exception:
         logger.warning("razbor_count failed (continuing)", exc_info=True)
         return 0
+
+
+async def soglasie_est(tg_id: int, vid: str = "dnevnik") -> bool:
+    """Дано ли согласие. Сбой базы = «нет»: лучше лишний раз спросить,
+    чем пустить без согласия."""
+    try:
+        row = await _exec("SELECT 1 AS da FROM soglasiya WHERE tg_id = ? AND vid = ?",
+                          (tg_id, vid), fetch="one")
+        return bool(row)
+    except Exception:
+        logger.warning("soglasie_est failed (continuing)", exc_info=True)
+        return False
+
+
+async def soglasie_dat(tg_id: int, vid: str = "dnevnik") -> None:
+    """Записать согласие; повторное нажатие не меняет дату первого."""
+    await _exec("INSERT INTO soglasiya (tg_id, vid) VALUES (?, ?) "
+                "ON CONFLICT(tg_id, vid) DO NOTHING", (tg_id, vid))
 
 
 # ── ДНЕВНИК ОТНОШЕНИЙ (29.08.2026) ──────────────────────────────────────────

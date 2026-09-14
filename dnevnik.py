@@ -17,21 +17,23 @@ import logging
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, WebAppInfo
+from aiogram.types import (CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+                           Message, WebAppInfo)
 
 from config import settings
 from database import (
     dnevnik_aktivnye, dnevnik_get, dnevnik_itog_otmetit, dnevnik_moi,
     dnevnik_pin_otmetit, dnevnik_slot, dnevnik_zaversheny, log_event, razbor_save,
+    soglasie_dat, soglasie_est,
 )
 
 logger = logging.getLogger(__name__)
 
 dnevnik_router = Router()
 
-PIN_TEXT = ("Отметьте последние часы: стало ближе или дальше — и почему.\n\n"
+PIN_TEXT = ("Отметь последние часы: стало ближе или дальше — и почему.\n\n"
             "Одна отметка занимает минуту. Из этих минут к разбору соберётся картина, "
             "которую по памяти не восстановить.")
 PIN_BTN = "Поставить отметку"
@@ -52,6 +54,54 @@ def _kbd(label: str, put: str = "#/dnevnik") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=label, web_app=WebAppInfo(url=_app_url(put)))]])
 
 
+# ── Согласие перед дневником (решение Кая 14.09) ─────────────────────────────
+# Дневник — ответы о чувствах и отношениях: чувствительные данные. До первого
+# входа человек явно соглашается, кто их видит и кто обрабатывает. Факт и дата
+# согласия — в таблице soglasiya. Кнопка меню Mini App пока идёт мимо этой
+# двери: закрыть её можно только в коде приложения (ждёт репозиторий сайта).
+POLITIKA_URL = "https://kydaidy.com/privacy"
+SOGLASIE_TEXT = (
+    "Перед дневником — согласие. Твои отметки вижу я, чтобы подготовиться к разбору. "
+    "Хранятся они на серверах Cloudflare и Render, срез к разбору собирают сервисы "
+    "ИИ — Anthropic, Google, OpenAI; всё это за пределами России. Партнёр твоих "
+    "«почему» не видит.\n\n"
+    f"Подробнее: {POLITIKA_URL}\n"
+    "Удалить свои данные — команда /udalit.")
+SOGLASIE_BTN = "Принимаю и открываю дневник"
+SOGLASIE_SPASIBO = "Спасибо. Дневник открывается кнопкой ниже."
+
+
+async def kbd_vhod(tg_id: int, label: str = "Открыть дневник") -> InlineKeyboardMarkup:
+    """Единственная дверь в дневник из бота: без согласия — кнопка согласия."""
+    if await soglasie_est(tg_id):
+        return _kbd(label)
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=SOGLASIE_BTN, callback_data="dn:soglasie")]])
+
+
+async def tekst_vhoda(tg_id: int, tekst: str) -> str:
+    """К тексту перед дверью добавляем условия, если согласия ещё нет."""
+    return tekst if await soglasie_est(tg_id) else f"{tekst}\n\n{SOGLASIE_TEXT}"
+
+
+@dnevnik_router.callback_query(F.data == "dn:soglasie")
+async def cb_soglasie(cb: CallbackQuery):
+    await cb.answer()
+    try:
+        await soglasie_dat(cb.from_user.id)
+    except Exception:
+        logger.error("soglasie_dat failed for %s", cb.from_user.id, exc_info=True)
+        await cb.message.answer("Не получилось сохранить — нажми ещё раз, пожалуйста.",
+                                parse_mode=None)
+        return
+    await cb.message.answer(SOGLASIE_SPASIBO, parse_mode=None,
+                            reply_markup=_kbd("Открыть дневник"))
+    try:
+        await log_event(cb.from_user.id, "soglasie_dnevnik")
+    except Exception:
+        logger.debug("log_event soglasie_dnevnik failed", exc_info=True)
+
+
 @dnevnik_router.message(Command("dnevnik"))
 async def cmd_dnevnik(msg: Message):
     """Отдельная дверь в дневник.
@@ -67,12 +117,13 @@ async def predlozhit(msg, tg_id: int) -> None:
     """Предложение дневника после второго теста. Крэш-сейф: сбой не рвёт путь."""
     try:
         await msg.answer(
-            "Тесты показали, как устроен ваш цикл. Дневник покажет, когда он "
-            "запускается на самом деле.\n\n"
-            "Неделя отметок: каждые несколько часов — стало ближе или дальше и "
-            "почему. Можно вести одной или вдвоём с партнёром. По итогам недели "
-            "получишь срез — с ним я и приду к тебе на разбор.",
-            parse_mode=None, reply_markup=_kbd("Открыть дневник"))
+            await tekst_vhoda(tg_id,
+                "Тесты показали, как устроен ваш цикл. Дневник покажет, когда он "
+                "запускается на самом деле.\n\n"
+                "Неделя отметок: каждые несколько часов — стало ближе или дальше и "
+                "почему. Можно вести одной или вдвоём с партнёром. По итогам недели "
+                "получишь срез — с ним я и приду к тебе на разбор."),
+            parse_mode=None, reply_markup=await kbd_vhod(tg_id))
         await log_event(tg_id, "dnevnik_predlozhen")
     except Exception:
         logger.warning("dnevnik predlozhit failed (continuing)", exc_info=True)
@@ -142,8 +193,12 @@ async def run_dnevnik_tick(bot: Bot) -> None:
             continue
 
         await dnevnik_pin_otmetit(tg_id, slot)
+        # Начал дневник до согласия (до 14.09) — вместо пинка спрашиваем согласие.
+        est = await soglasie_est(tg_id)
+        tekst = PIN_TEXT if est else f"{PIN_TEXT}\n\n{SOGLASIE_TEXT}"
+        kbd = _kbd(PIN_BTN) if est else await kbd_vhod(tg_id)
         try:
-            await bot.send_message(tg_id, PIN_TEXT, parse_mode=None, reply_markup=_kbd(PIN_BTN))
+            await bot.send_message(tg_id, tekst, parse_mode=None, reply_markup=kbd)
             await log_event(tg_id, "dnevnik_pin", slot)
         except Exception as e:
             msg = str(e).lower()
@@ -174,6 +229,12 @@ async def run_dnevnik_itog_tick(bot: Bot) -> None:
             await log_event(tg_id, "dnevnik_itog", str(len(otmetki)))
         except Exception:
             logger.error("dnevnik itog send failed for %s", tg_id, exc_info=True)
+
+        if not await soglasie_est(tg_id):
+            # Без согласия (14.09) срез Алёне не уходит: человек может записаться
+            # на разбор сам, тогда Алёна получит только его три ответа.
+            logger.info("dnevnik itog %s: без согласия, автозаявки нет", tg_id)
+            continue
 
         # Автозаявка (решение Кая 29.08): срез уходит Алёне сам, человек об этом
         # предупреждён на экране старта дневника.

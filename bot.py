@@ -156,6 +156,9 @@ async def main():
     # кто прошёл тесты раньше и до конца второго теста больше не дойдёт.
     from dnevnik import dnevnik_router
     dp.include_router(dnevnik_router)
+    # /udalit (14.09): человек удаляет свои данные — обещано в согласии перед дневником.
+    from udalit import udalit_router
+    dp.include_router(udalit_router)
     # Своя запись на встречу (29.08, вместо Calendly): /vstrecha, /okna и шаги
     # выбора времени. Только callback'и vst:* и две команды — конфликтов нет.
     from vstrecha import vstrecha_router

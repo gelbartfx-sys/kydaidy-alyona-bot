@@ -416,6 +416,7 @@ async def cmd_help(message: Message):
         "/razbor — записаться на разбор сценария отношений\n"
         "/vstrecha — время встречи: выбрать, перенести, отменить\n"
         "/dnevnik — дневник отношений на неделю\n"
+        "/udalit — удалить свои данные\n"
         "/help — эта справка",
         parse_mode="Markdown",
     )

@@ -322,11 +322,11 @@ NET_VREMENI = ("Свободного времени сейчас нет — я �
                "каждую неделю. Напиши мне здесь, и я вернусь к тебе со временем.")
 
 
-def kbd_dnevnik() -> InlineKeyboardMarkup:
-    """Дверь в дневник с экрана «разбор после дневника». Импорт внутри: dnevnik
-    тянет базу и планировщик, а запись должна импортироваться без них."""
-    from dnevnik import _kbd
-    return _kbd("Открыть дневник")
+async def kbd_dnevnik(tg_id: int) -> InlineKeyboardMarkup:
+    """Дверь в дневник с экрана «разбор после дневника» — та же, что везде,
+    с согласием (14.09). Импорт внутри: dnevnik тянет базу и планировщик."""
+    from dnevnik import kbd_vhod
+    return await kbd_vhod(tg_id)
 
 
 async def ne_pustit(msg: Message, tg_id: int, source: str) -> bool:
@@ -334,7 +334,9 @@ async def ne_pustit(msg: Message, tg_id: int, source: str) -> bool:
     ok, pochemu = await dopusk(tg_id)
     if ok:
         return False
-    await msg.answer(pochemu, parse_mode=None, reply_markup=kbd_dnevnik())
+    from dnevnik import tekst_vhoda           # условия согласия — рядом с его кнопкой
+    await msg.answer(await tekst_vhoda(tg_id, pochemu), parse_mode=None,
+                     reply_markup=await kbd_dnevnik(tg_id))
     try:
         await log_event(tg_id, "razbor_do_dnevnika", source or None)
     except Exception:
