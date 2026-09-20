@@ -97,6 +97,25 @@ async def progon() -> list[str]:
         otv = (await r.json()).get("pisma", [])
         nado(len(otv) == 1 and otv[0]["otvet_na"] == pid, f"Кай прочёл не то: {otv}")
 
+        # 20.09: несколько длинных писем разом не должны переполнить ответ Action
+        # (живой баг — ResponseTooLargeError на реальном мосту, MAX_ZA_RAZ считал
+        # штуки, не знаки). Три письма по 15 тыс. знаков — влезет 1-2, не все три.
+        for _ in range(3):
+            await c.post("/most/alyone", headers=H(KAI),
+                         json={"tema": "Длинное", "tekst": "д" * 15_000})
+        r = await c.get("/most/novoe", headers=H(GPT))
+        pachka = (await r.json()).get("pisma", [])
+        znakov_v_pachke = sum(len(p["tekst"]) for p in pachka)
+        nado(0 < len(pachka) < 3, f"пачка длинных писем: отдано {len(pachka)} из 3 разом")
+        nado(znakov_v_pachke <= most.MAX_ZNAKOV_V_OTVETE,
+             f"пачка длинных писем: {znakov_v_pachke} знаков — переполнит Action")
+        # добор остатка — иначе последующие проверки в этом же прогоне унаследуют
+        # недочитанные длинные письма из этой пачки
+        for _ in range(5):
+            r = await c.get("/most/novoe", headers=H(GPT))
+            if not (await r.json()).get("pisma"):
+                break
+
         do = await db._exec("SELECT COUNT(*) AS n FROM most_pisma", fetch="one")
         r1 = await c.post("/most/alyone", headers=H(KAI), json={"tekst": "   "})
         r2 = await c.post("/most/alyone", headers=H(KAI), json={"tekst": "я" * DLINNOE})
@@ -135,6 +154,13 @@ async def kanareyki() -> list[str]:
     if not await progon():
         tihie.append("лимит длины")
     most.MAX_TEKST = orig_max
+
+    # 4. бюджет пачки снят — вернулся живой баг ResponseTooLargeError
+    orig_budget = most.MAX_ZNAKOV_V_OTVETE
+    most.MAX_ZNAKOV_V_OTVETE = 10 ** 9
+    if not await progon():
+        tihie.append("бюджет пачки")
+    most.MAX_ZNAKOV_V_OTVETE = orig_budget
     return tihie
 
 
@@ -143,7 +169,7 @@ async def main() -> int:
     if tihie:
         print("КАНАРЕЙКИ НЕ ПОКРАСНЕЛИ:", ", ".join(tihie), "— вердикт не выносится")
         return 2
-    print("канарейки: 3/3 покраснели")
+    print("канарейки: 4/4 покраснели")
     bedy = await progon()
     for b in bedy:
         print("КРАСНОЕ:", b)

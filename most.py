@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 
 MAX_TEKST = 60_000   # сценарий эфира ≈ 35 тыс. знаков; ответ Action у GPT ограничен ~100 тыс.
 MAX_ZA_RAZ = 5       # столько писем GPT забирает за один вызов — чтобы ответ не упёрся в лимит
+# 20.09: MAX_ZA_RAZ считал ШТУКИ, а не байты — пять писем по 35-60 тыс. знаков каждое
+# всё равно упирались в лимит Action (ResponseTooLargeError, поймано на живом мосту).
+# MAX_ZNAKOV_V_OTVETE — суммарный бюджет символов на один забор; хотя бы одно письмо
+# отдаётся всегда, даже если оно само больше бюджета — иначе длинное письмо блокирует
+# очередь навечно (никогда не наберётся места для него одного).
+MAX_ZNAKOV_V_OTVETE = 20_000
 
 ALYONA_ID = 680319075  # тот же id, что в config.ADMIN_IDS и purchase_gate_whitelist
 
@@ -87,10 +93,20 @@ async def zabrat(napravlenie: str, limit: int = MAX_ZA_RAZ) -> list[dict]:
         "SELECT id, tema, tekst, otvet_na, created_at FROM most_pisma "
         "WHERE napravlenie = ? AND prochitano_at IS NULL ORDER BY id LIMIT ?",
         (napravlenie, limit), fetch="all") or []
+
+    otdaём: list[dict] = []
+    znakov = 0
     for r in rows:
+        dlina = len(r.get("tekst") or "")
+        if otdaём and znakov + dlina > MAX_ZNAKOV_V_OTVETE:
+            break  # бюджет исчерпан — остальное отдадим следующим забором
+        otdaём.append(r)
+        znakov += dlina
+
+    for r in otdaём:
         await db._exec(
             "UPDATE most_pisma SET prochitano_at = CURRENT_TIMESTAMP WHERE id = ?", (r["id"],))
-    return rows
+    return otdaём
 
 
 async def _telo(request: web.Request) -> dict:
