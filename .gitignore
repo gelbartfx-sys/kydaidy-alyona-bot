@@ -16,3 +16,6 @@ content/pdf/*.pdf
 # Старое TTS-аудио практик — не используется, не кладём в деплой
 content/audio/manifest-7/
 .calendly-token
+
+# ключи моста (most-kai-key.txt) — не в git
+credentials/
