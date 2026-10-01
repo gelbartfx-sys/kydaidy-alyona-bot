@@ -78,6 +78,10 @@ async def progon() -> list[str]:
         nado(r.status == 401, f"ключ Кая открыл дверь GPT → {r.status}")
         r = await c.get("/most/novoe")
         nado(r.status == 401, f"без заголовка → {r.status}")
+        # 02.10: сводку читают оба ключа (GPT Алёны и Кай), чужой — нет
+        for k, ozh in ((GPT, 200), (KAI, 200), ("чужой", 401)):
+            r = await c.get("/most/svodka?dney=1", headers=H(k))
+            nado(r.status == ozh, f"svodka ключом {k} → {r.status}, нужно {ozh}")
 
         r = await c.post("/most/alyone", headers=H(KAI), json={"tema": "Сценарий", "tekst": "Прочитай"})
         nado(r.status == 200, f"письмо Алёне → {r.status}")

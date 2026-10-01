@@ -119,10 +119,12 @@ async def _telo(request: web.Request) -> dict:
     return data
 
 
-def _dveri(imya_klyucha: str):
+def _dveri(*imena_klyuchey: str):
+    """Дверь пускает по любому из ключей; код отказа — от первого (чужой 401, не заведён 503)."""
     def obertka(handler):
         async def h(request: web.Request):
-            kod = proverit(request.headers.get("Authorization"), imya_klyucha)
+            kody = [proverit(request.headers.get("Authorization"), i) for i in imena_klyuchey]
+            kod = 200 if 200 in kody else kody[0]
             if kod != 200:
                 return web.json_response({"error": "нет доступа"}, status=kod)
             return await handler(request)
@@ -173,7 +175,7 @@ def setup_most(app: web.Application, bot) -> None:
         return web.json_response({"pisma": await zabrat("ot_alyony", limit=50)})
 
     # ── Ручки расписания и сводки для GPT Алёны (14.09) ────────────────────────
-    @_dveri("MOST_GPT_KEY")
+    @_dveri("MOST_GPT_KEY", "MOST_KAI_KEY")
     async def h_svodka(request):
         try:
             dney = max(1, min(90, int(request.query.get("dney", "7"))))
